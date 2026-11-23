@@ -118,9 +118,13 @@ def test_history_roundtrip(tmp_path, monkeypatch):
 
 def test_win_task_script_and_time():
     s = win_task.build_install_script("03:30", Path(r"C:\Users\O'Neil\venv\pythonw.exe"),
+                                      "-m claude_data_backup.scheduled_run",
                                       Path(r"C:\Users\O'Neil"))
     assert "'C:\\Users\\O''Neil\\venv\\pythonw.exe'" in s
-    assert "claude_data_backup.scheduled_run" in s
+    assert "-Argument '-m claude_data_backup.scheduled_run'" in s
+    s2 = win_task.build_install_script("03:30", Path(r"C:\v\claude-backup-run.exe"), "",
+                                       Path(r"C:\u"))
+    assert "-Argument" not in s2
     assert "-Daily -At '03:30'" in s
     assert "-RunLevel Limited" in s
     assert win_task.valid_time("03:30") and win_task.valid_time("23:59")

@@ -1,2 +1,2 @@
 """ClaudeDataBackup —— 跨平台 Claude 数据备份工具。"""
-__version__ = "0.4.1"
+__version__ = "0.5.0"

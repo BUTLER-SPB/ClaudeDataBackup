@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Бэкап Claude</title>
+<style>
+:root{
+  --bg:#F4F5F7; --surface:#FFFFFF; --surface-2:#F8F9FB; --line:#E7E9EE;
+  --text:#14161A; --muted:#5F6672; --faint:#8C929C;
+  --accent:#D97757; --accent-2:#C2613F; --accent-soft:#FBEDE7;
+  --ok:#1F9D57; --ok-soft:#E5F5EC; --warn:#C27C0E; --warn-soft:#FDF3E1;
+  --bad:#D2393C; --bad-soft:#FCE9E9; --idle:#9AA0AA; --idle-soft:#EFF1F4;
+  --shadow:0 1px 2px rgba(16,24,40,.04),0 4px 16px rgba(16,24,40,.06);
+  --radius:16px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111214; --surface:#1A1C1F; --surface-2:#202326; --line:#2B2F34;
+    --text:#ECEDEF; --muted:#A3A9B3; --faint:#7B828C;
+    --accent:#E58B6C; --accent-2:#F09C7E; --accent-soft:#3A2620;
+    --ok:#3CC57A; --ok-soft:#173224; --warn:#E9A23B; --warn-soft:#3A2D14;
+    --bad:#F0686A; --bad-soft:#3B1D1E; --idle:#7B828C; --idle-soft:#26292D;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.25);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);
+  font:14px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"SF Pro Text",sans-serif;
+  -webkit-font-smoothing:antialiased;user-select:none}
+button{font:inherit;color:inherit}
+.wrap{max-width:1080px;margin:0 auto;padding:22px 28px 32px}
+
+/* header */
+header{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.logo{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--accent),#B9553A);box-shadow:0 4px 12px rgba(217,119,87,.35)}
+.logo svg{width:20px;height:20px;color:#fff}
+header h1{font:600 18px/1.2 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;margin:0}
+header .ver{color:var(--faint);font-size:12px}
+header .sp{flex:1}
+.icon-btn{border:0;background:transparent;color:var(--muted);height:34px;padding:0 12px;border-radius:10px;
+  display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.icon-btn:hover{background:var(--surface-2);color:var(--text)}
+.icon-btn svg{width:16px;height:16px}
+
+/* cards */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.card h2{font-size:13px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
+.pad{padding:20px 22px}
+
+/* hero */
+.hero{display:flex;gap:20px;align-items:center;padding:24px 26px;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;right:-80px;top:-80px;width:260px;height:260px;border-radius:50%;
+  background:radial-gradient(closest-side,var(--accent-soft),transparent);pointer-events:none}
+.status-ic{width:56px;height:56px;border-radius:16px;display:grid;place-items:center;flex:none;transition:.3s}
+.status-ic svg{width:28px;height:28px}
+.s-ok .status-ic{background:var(--ok-soft);color:var(--ok)}
+.s-warn .status-ic{background:var(--warn-soft);color:var(--warn)}
+.s-bad .status-ic{background:var(--bad-soft);color:var(--bad)}
+.s-idle .status-ic,.s-run .status-ic{background:var(--accent-soft);color:var(--accent)}
+.hero-text{flex:1;min-width:0;z-index:1}
+.hero-title{font:600 22px/1.25 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;margin:0 0 4px}
+.hero-sub{color:var(--muted);margin:0}
+.hero-actions{display:flex;gap:10px;z-index:1;flex-wrap:wrap;justify-content:flex-end}
+.btn{border:1px solid var(--line);background:var(--surface);height:40px;padding:0 18px;border-radius:12px;
+  cursor:pointer;font-weight:500;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;transition:.15s}
+.btn:hover{background:var(--surface-2)}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(217,119,87,.35)}
+.btn.primary:hover{background:var(--accent-2)}
+.btn.warn{background:var(--warn);border-color:transparent;color:#fff}
+.btn.small{height:32px;padding:0 12px;border-radius:10px;font-size:13px}
+.btn:disabled{opacity:.55;cursor:default;box-shadow:none}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.progress{margin-top:14px;display:none}
+.running .progress{display:block}
+.bar{height:6px;border-radius:6px;background:var(--idle-soft);overflow:hidden;position:relative}
+.bar i{position:absolute;inset:0;width:35%;border-radius:6px;background:linear-gradient(90deg,var(--accent),#F0A487);
+  animation:slide 1.3s ease-in-out infinite}
+@keyframes slide{0%{left:-35%}100%{left:100%}}
+.cur{margin-top:8px;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.details{margin-top:6px}
+.link{border:0;background:none;color:var(--accent);cursor:pointer;padding:0;font-size:12.5px}
+pre.log{display:none;margin:8px 0 0;max-height:180px;overflow:auto;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:10px;padding:10px 12px;font:12px/1.5 "Cascadia Mono",Consolas,ui-monospace,monospace;color:var(--muted);
+  white-space:pre-wrap;user-select:text}
+pre.log.open{display:block}
+
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:14px 0}
+.stat{padding:16px 18px}
+.stat .k{color:var(--faint);font-size:12.5px}
+.stat .v{font:600 24px/1.2 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;margin-top:4px}
+.stat .v small{font-size:13px;font-weight:500;color:var(--muted)}
+
+/* columns */
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:900px){.cols{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr 1fr}}
+
+/* sources */
+.src{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-top:1px solid var(--line)}
+.src:first-of-type{border-top:0;padding-top:2px}
+.src-ic{width:34px;height:34px;border-radius:10px;background:var(--surface-2);display:grid;place-items:center;flex:none;color:var(--muted)}
+.src-ic svg{width:18px;height:18px}
+.src-body{flex:1;min-width:0}
+.src-name{font-weight:600}
+.src-det{color:var(--muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis}
+.chip{font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;white-space:nowrap;flex:none}
+.chip.ok{background:var(--ok-soft);color:var(--ok)}
+.chip.warn{background:var(--warn-soft);color:var(--warn)}
+.chip.bad{background:var(--bad-soft);color:var(--bad)}
+.chip.idle{background:var(--idle-soft);color:var(--idle)}
+.banner{margin-top:12px;border-radius:12px;background:var(--warn-soft);padding:14px 16px;display:none}
+.banner.show{display:block}
+.banner b{display:block;margin-bottom:4px}
+.banner p{margin:0 0 10px;color:var(--muted);font-size:13px}
+.card-foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;color:var(--faint);font-size:12px}
+
+/* settings */
+.set{padding:12px 0;border-top:1px solid var(--line)}
+.set:first-of-type{border-top:0;padding-top:2px}
+.set-label{font-weight:600;margin-bottom:6px}
+.path{display:flex;gap:8px;align-items:center}
+.path code{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;
+  padding:7px 10px;font:12.5px "Cascadia Mono",Consolas,ui-monospace,monospace;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.sched{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.switch{position:relative;width:44px;height:26px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;border-radius:26px;background:var(--idle-soft);border:1px solid var(--line);cursor:pointer;transition:.2s}
+.switch span::before{content:"";position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.2s}
+.switch input:checked+span{background:var(--accent);border-color:transparent}
+.switch input:checked+span::before{transform:translateX(18px)}
+input[type=time]{height:34px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--text);
+  padding:0 10px;font:inherit}
+.sched-note{color:var(--muted);font-size:12.5px;margin-top:8px}
+
+/* history */
+.hist{margin-top:14px}
+.hist-head{display:flex;justify-content:space-between;align-items:baseline}
+.items{display:flex;flex-direction:column}
+.item{display:flex;align-items:center;gap:14px;padding:11px 4px;border-top:1px solid var(--line)}
+.item:first-child{border-top:0}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+.item-main{flex:1;min-width:0}
+.item-title{font-weight:600}
+.item-meta{color:var(--faint);font-size:12.5px}
+.tags{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.tag{font-size:12px;padding:3px 9px;border-radius:8px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line);white-space:nowrap}
+.empty{color:var(--faint);padding:18px 4px 6px;text-align:center}
+
+/* узкое окно */
+body{overflow-x:hidden}
+header h1{white-space:nowrap}
+.cols>*,.stats>*{min-width:0}
+.src-det{word-break:break-all}
+@media (max-width:640px){ .icon-btn span{display:none} }
+@media (max-width:860px){
+  .wrap{padding:16px 16px 24px}
+  .hero{flex-wrap:wrap;padding:20px}
+  .hero-text{flex:1 1 calc(100% - 80px)}
+  .hero-actions{width:100%;justify-content:flex-start}
+  .stats{gap:10px}
+  .stat{padding:12px 14px}
+  .stat .v{font-size:20px}
+  .item{flex-wrap:wrap}
+  .tags{width:100%;justify-content:flex-start;padding-left:24px}
+}
+
+/* modal + toast */
+.scrim{position:fixed;inset:0;background:rgba(10,12,16,.45);backdrop-filter:blur(3px);display:none;place-items:center;z-index:10}
+.scrim.show{display:grid}
+.modal{width:min(460px,calc(100vw - 40px));background:var(--surface);border-radius:20px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.3);
+  animation:pop .18s ease-out}
+@keyframes pop{from{transform:scale(.96);opacity:0}}
+.modal h3{margin:0 0 8px;font:600 18px/1.3 "Segoe UI Variable Display","Segoe UI",system-ui,sans-serif}
+.modal p{margin:0 0 10px;color:var(--muted)}
+.modal ul{margin:0 0 16px;padding-left:18px;color:var(--muted);font-size:13px}
+.modal .row{display:flex;gap:10px;justify-content:flex-end}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);opacity:0;background:var(--text);color:var(--bg);
+  padding:10px 16px;border-radius:12px;font-size:13px;transition:.25s;z-index:20;max-width:80vw}
+.toast.show{opacity:1;transform:translateX(-50%)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+    <div><h1>Бэкап Claude</h1><div class="ver" id="ver"></div></div>
+    <div class="sp"></div>
+    <button class="icon-btn" id="btnFolder" title="Открыть папку с бэкапами"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Папка</span></button>
+    <button class="icon-btn" id="btnLog" title="Технический журнал"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg><span>Журнал</span></button>
+  </header>
+
+  <section class="card hero s-idle" id="hero">
+    <div class="status-ic" id="statusIc"></div>
+    <div class="hero-text">
+      <p class="hero-title" id="heroTitle">Загрузка…</p>
+      <p class="hero-sub" id="heroSub"></p>
+      <div class="progress">
+        <div class="bar"><i></i></div>
+        <div class="cur" id="cur">Запуск…</div>
+        <div class="details"><button class="link" id="btnDetails">Подробности</button></div>
+        <pre class="log" id="log"></pre>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <button class="btn" id="btnViewer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>Открыть чаты</button>
+      <button class="btn primary" id="btnBackup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg><span>Сделать бэкап</span></button>
+    </div>
+  </section>
+
+  <div class="stats">
+    <div class="card stat"><div class="k">Чатов claude.ai</div><div class="v" id="stConv">—</div></div>
+    <div class="card stat"><div class="k">Сессий Claude Code</div><div class="v" id="stSess">—</div></div>
+    <div class="card stat"><div class="k">Следующий бэкап</div><div class="v" id="stNext">—</div></div>
+  </div>
+
+  <div class="cols">
+    <section class="card pad">
+      <h2>Что сохраняется</h2>
+      <div class="src">
+        <div class="src-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+        <div class="src-body"><div class="src-name">Claude Desktop</div><div class="src-det" id="dDesk">—</div></div>
+        <span class="chip idle" id="cDesk">—</span>
+      </div>
+      <div class="src">
+        <div class="src-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <div class="src-body"><div class="src-name">Чаты claude.ai</div><div class="src-det" id="dKey">—</div></div>
+        <span class="chip idle" id="cKey">—</span>
+      </div>
+      <div class="src">
+        <div class="src-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></div>
+        <div class="src-body"><div class="src-name">Claude Code</div><div class="src-det" id="dCode">—</div></div>
+        <span class="chip idle" id="cCode">—</span>
+      </div>
+      <div class="banner" id="keyBanner">
+        <b>Нужно один раз подключить claude.ai</b>
+        <p>Claude Desktop закроется на несколько секунд и сразу откроется снова — так приложение получит доступ к чатам.</p>
+        <button class="btn warn small" id="btnKey">Подключить</button>
+      </div>
+      <div class="card-foot"><span id="prepTime">Ещё не проверялось</span><button class="link" id="btnPrep">Проверить снова</button></div>
+    </section>
+
+    <section class="card pad">
+      <h2>Настройки</h2>
+      <div class="set">
+        <div class="set-label">Папка для бэкапов</div>
+        <div class="path"><code id="dir">—</code><button class="btn small" id="btnDir">Изменить</button></div>
+      </div>
+      <div class="set">
+        <div class="set-label">Автоматический бэкап</div>
+        <div class="sched">
+          <label class="switch"><input type="checkbox" id="schedOn"><span></span></label>
+          <span>Каждый день в</span>
+          <input type="time" id="schedAt" value="03:30">
+        </div>
+        <div class="sched-note" id="schedNote">Проверяю…</div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card pad hist">
+    <div class="hist-head"><h2>История</h2><button class="link" id="btnMore" style="display:none">Показать все</button></div>
+    <div class="items" id="items"><div class="empty">Бэкапов пока не было</div></div>
+  </section>
+</div>
+
+<div class="scrim" id="scrim"><div class="modal">
+  <h3 id="mTitle"></h3><div id="mBody"></div>
+  <div class="row"><button class="btn" id="mNo">Позже</button><button class="btn primary" id="mYes">OK</button></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const IC = {
+  ok:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
+  warn:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 8v5M12 16.5v.5"/><path d="M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
+  bad:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+  idle:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z"/></svg>',
+  run:'<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>',
+};
+const TRIG = {manual:'вручную', schedule:'по расписанию', cli:'из консоли'};
+let S = null, TASK = null, busy = false, showAll = false;
+const api = () => window.pywebview.api;
+
+/* ── время ─────────────────────────────────────── */
+function parseT(s){ if(!s) return null; const [d,t='00:00:00']=s.split(' '); const [y,m,dd]=d.split('-').map(Number); const [h,mi,se=0]=t.split(':').map(Number); return new Date(y,m-1,dd,h,mi,se); }
+function dayLabel(dt){ const n=new Date(); const a=new Date(n.getFullYear(),n.getMonth(),n.getDate()); const b=new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()); const diff=Math.round((a-b)/864e5);
+  if(diff===0) return 'Сегодня'; if(diff===1) return 'Вчера'; if(diff===-1) return 'Завтра';
+  return dt.toLocaleDateString('ru-RU',{day:'numeric',month:'long'}); }
+const hm = dt => dt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+function when(s){ const d=parseT(s); return d ? `${dayLabel(d).toLowerCase()} в ${hm(d)}` : '—'; }
+function ago(s){ const d=parseT(s); if(!d) return ''; const m=Math.round((Date.now()-d)/6e4);
+  if(m<1) return 'только что'; if(m<60) return `${m} мин назад`; const h=Math.round(m/60); if(h<24) return `${h} ч назад`; const dd=Math.round(h/24); return `${dd} дн назад`; }
+function dur(s){ s=Math.round(s||0); return s<60?`${s} с`:`${Math.floor(s/60)} мин ${s%60} с`; }
+function plural(n,a,b,c){ n=Math.abs(n)%100; const n1=n%10; if(n>10&&n<20) return c; if(n1>1&&n1<5) return b; if(n1===1) return a; return c; }
+
+/* ── UI helpers ────────────────────────────────── */
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),3500); }
+function ask(title, html, yes='Продолжить', no='Позже'){ return new Promise(res=>{ $('mTitle').textContent=title; $('mBody').innerHTML=html; $('mYes').textContent=yes; $('mNo').textContent=no;
+  $('scrim').classList.add('show'); const done=v=>{ $('scrim').classList.remove('show'); res(v); }; $('mYes').onclick=()=>done(true); $('mNo').onclick=()=>done(false); }); }
+function chip(id, cls, text){ const c=$(id); c.className='chip '+cls; c.textContent=text; }
+function setBusy(on, label){ busy=on; ['btnBackup','btnKey','btnPrep','btnDir'].forEach(i=>$(i).disabled=on);
+  $('btnBackup').querySelector('span').textContent = on ? (label||'Подождите…') : 'Сделать бэкап'; }
+function hero(state, title, sub){ const h=$('hero'); h.className='card hero s-'+state+(state==='run'?' running':''); $('statusIc').innerHTML=IC[state]||IC.idle; $('heroTitle').textContent=title; $('heroSub').textContent=sub||''; }
+function logLine(l){ const p=$('log'); p.textContent += l+'\n'; p.scrollTop=p.scrollHeight; $('cur').textContent=l; }
+
+/* ── отрисовка ─────────────────────────────────── */
+function needKey(){ const k=S?.prep?.key, o=S?.prep?.online; if(!S?.prep?.desktop?.found) return false;
+  if(k && !k.found && k.locked) return true; if(k?.source==='stored' && o?.checked && !o.ok) return true; return false; }
+
+function renderSources(){
+  const p=S.prep;
+  if(!p){ ['cDesk','cKey','cCode'].forEach(i=>chip(i,'idle','—')); $('dDesk').textContent=$('dKey').textContent=$('dCode').textContent='ещё не проверялось'; $('keyBanner').classList.remove('show'); return; }
+  const d=p.desktop||{}, k=p.key||{}, o=p.online||{}, c=p.code||{};
+  if(d.found){ chip('cDesk','ok','Найден'); $('dDesk').textContent=d.profile; $('dDesk').title=d.profile; }
+  else { chip('cDesk','idle','Не найден'); $('dDesk').textContent='Не установлен на этом компьютере'; }
+  if(o.ok){ chip('cKey','ok','Подключено'); const n=(o.org_names||[]).filter(Boolean).join(', '); $('dKey').textContent = n ? `Аккаунт: ${n}` : `Организаций: ${o.orgs}`; }
+  else if(k.found && o.checked){ chip('cKey','bad','Ошибка'); $('dKey').textContent=o.error||'Ключ не принят'; }
+  else if(k.found){ chip('cKey','ok','Подключено'); $('dKey').textContent='Ключ сохранён'; }
+  else if(k.locked){ chip('cKey','warn','Нужно подключить'); $('dKey').textContent='Claude Desktop открыт и не даёт прочитать ключ'; }
+  else if(d.found && k.error==='not_found'){ chip('cKey','bad','Нет входа'); $('dKey').textContent='Войдите в аккаунт в Claude Desktop и нажмите «Проверить снова»'; }
+  else if(d.found){ chip('cKey','bad','Ошибка'); $('dKey').textContent=k.error||'Ключ не прочитан'; }
+  else { chip('cKey','idle','—'); $('dKey').textContent='Нужен Claude Desktop с входом в аккаунт'; }
+  if(c.found){ chip('cCode','ok', `${c.sessions} ${plural(c.sessions,'сессия','сессии','сессий')}`); $('dCode').textContent=c.dir; $('dCode').title=c.dir; }
+  else { chip('cCode','idle','Нет'); $('dCode').textContent='Не используется на этом компьютере'; }
+  $('keyBanner').classList.toggle('show', needKey());
+  $('prepTime').textContent = p.time ? `Проверено ${when(p.time)}` : '';
+}
+
+function renderHero(){
+  if(busy) return;
+  const last=S.history[0];
+  if(!S.has_backup || !last){ hero('idle','Бэкапов ещё нет','Нажмите «Сделать бэкап» — первый займёт пару минут'); return; }
+  const age=(Date.now()-parseT(last.time))/36e5; const tail=`Последний бэкап ${when(last.time)} (${ago(last.time)})`;
+  if(last.exit_code===1){ hero('bad','Последний бэкап не удался', tail+'. Подробности — в журнале.'); return; }
+  if(age>72){ hero('warn','Давно не было бэкапа', tail); return; }
+  if(last.exit_code===0){ hero('ok','Всё сохранено', tail); return; }
+  const connected = S.prep?.online?.ok || (S.prep?.key?.found && !S.prep?.online?.checked);
+  const why = (last.mode_a||{}).status!=='ok'
+    ? (connected ? 'claude.ai подключён — сделайте бэкап, чтобы сохранить чаты' : 'чаты claude.ai не сохранены — подключите claude.ai')
+    : 'часть данных не сохранена';
+  hero('warn','Сохранено частично', `${tail} · ${why}`);
+}
+
+function renderStats(){
+  $('stConv').innerHTML = S.summary.conversations;
+  $('stSess').innerHTML = S.summary.sessions;
+  $('btnViewer').disabled = !S.has_viewer;
+}
+
+function renderTask(){
+  const t=TASK||{}; const note=$('schedNote');
+  if(!S.schedule_supported){ $('schedOn').disabled=true; note.textContent='Расписание на этой системе пока не поддерживается'; $('stNext').innerHTML='—'; return; }
+  $('schedOn').checked=!!t.exists; if(t.at) $('schedAt').value=t.at;
+  if(!t.exists){ note.textContent='Выключен — бэкап только вручную'; $('stNext').innerHTML='<small>выключен</small>'; return; }
+  const nd=parseT(t.next_run); $('stNext').innerHTML = nd ? `${hm(nd)} <small>${dayLabel(nd).toLowerCase()}</small>` : '—';
+  let s='Если компьютер выключен, бэкап выполнится при включении.';
+  if(!t.ours) s='Задача создана другой установкой — переключите, чтобы обновить.';
+  note.textContent=s;
+}
+
+function renderHistory(){
+  const box=$('items'), h=S.history||[];
+  if(!h.length){ box.innerHTML='<div class="empty">Бэкапов пока не было</div>'; $('btnMore').style.display='none'; return; }
+  const list = showAll ? h : h.slice(0,6);
+  $('btnMore').style.display = h.length>6 ? '' : 'none'; $('btnMore').textContent = showAll ? 'Свернуть' : `Показать все (${h.length})`;
+  box.innerHTML = list.map(r=>{
+    const d=parseT(r.time), ec=r.exit_code, cls= ec===0?'ok':(ec===1?'bad':'warn');
+    const res = ec===0?'Успешно':ec===4?'Частично':ec===3?'Нет доступа к claude.ai':'Ошибка';
+    const a=r.mode_a||{}, c=r.mode_c||{}, tags=[];
+    if(a.status==='ok') tags.push(`claude.ai +${a.new||0}${a.updated?` · обновлено ${a.updated}`:''}`);
+    if(c.status==='ok') tags.push(`Claude Code +${c.new||0}`);
+    if(r.error) tags.push('см. журнал');
+    return `<div class="item"><span class="dot ${cls}"></span><div class="item-main"><div class="item-title">${dayLabel(d)}, ${hm(d)} · ${res}</div>
+      <div class="item-meta">${TRIG[r.trigger]||r.trigger} · ${dur(r.duration_s)}</div></div>
+      <div class="tags">${tags.map(t=>`<span class="tag">${t}</span>`).join('')}</div></div>`; }).join('');
+}
+
+function render(){ $('ver').textContent='версия '+S.version; $('dir').textContent=S.backup_dir; $('dir').title=S.backup_dir;
+  renderStats(); renderSources(); renderHistory(); renderHero(); renderTask(); }
+
+async function refresh(){ S = await api().get_state(); render(); }
+async function refreshTask(){ TASK = await api().get_task(); renderTask(); }
+
+/* ── действия ──────────────────────────────────── */
+async function doPrepare(silent){
+  setBusy(true,'Проверяю…'); hero('run','Проверяю компьютер','Ищу Claude Desktop, ключ claude.ai и сессии Claude Code');
+  try{ const r=await api().prepare(); if(r.error) toast('Ошибка проверки: '+r.error); }
+  finally{ setBusy(false); await refresh(); }
+  if(!silent && !needKey()) toast('Проверка завершена');
+}
+
+async function doReadKey(confirmed){
+  if(!confirmed && !await confirmKey()) return false;
+  setBusy(true,'Подключаю…'); hero('run','Подключаю claude.ai','Claude Desktop закроется на несколько секунд и откроется снова');
+  let r={ok:false};
+  try{ r=await api().read_key(); } finally{ setBusy(false); }
+  if(r.ok) toast('claude.ai подключён'); else toast('Не удалось: '+(r.error||'ошибка'));
+  await doPrepare(true);
+  return r.ok;
+}
+function confirmKey(){
+  return ask('Подключить claude.ai', `<p>Claude Desktop закроется на несколько секунд, приложение прочитает ключ входа, и Claude сразу откроется снова.</p>
+    <ul><li>несохранённый текст в окне Claude может пропасть;</li><li>сеансы во вкладке Code приложения Claude будут прерваны;</li><li>Claude Code в терминале не затрагивается.</li></ul>
+    <p style="font-size:12.5px">Ключ хранится зашифрованным: прочитать его может только ваша учётная запись Windows на этом компьютере.</p>`, 'Подключить', 'Не сейчас');
+}
+
+async function doBackup(){
+  if(busy) return;
+  const r=await api().backup(); if(!r.started){ toast(r.error||'Не удалось запустить'); return; }
+  $('log').textContent=''; setBusy(true,'Идёт бэкап…'); hero('run','Идёт бэкап','Можно свернуть окно — бэкап продолжится');
+}
+
+window.onBackend = async (e) => {
+  if(e.type==='log') logLine(e.line);
+  if(e.type==='done'){
+    setBusy(false); await refresh();
+    const ec=e.exit_code; toast(ec===0?'Бэкап завершён':ec===4?'Бэкап завершён частично':ec===3?'Нет доступа к claude.ai':'Бэкап не удался — см. журнал');
+    if(window._afterBackup){ const f=window._afterBackup; window._afterBackup=null; f(); }
+  }
+};
+
+/* первый запуск: проверка → (ключ) → расписание → первый бэкап */
+async function onboarding(){
+  await doPrepare(true);
+  if(needKey() && await confirmKey()) await doReadKey(true);
+  const s=await api().ensure_default_schedule(); TASK=s.task; renderTask(); if(s.created) toast('Включён ежедневный бэкап в 03:30');
+  await refresh(); if(!S.has_backup) doBackup();
+}
+
+/* ── обработчики ───────────────────────────────── */
+$('btnBackup').onclick = doBackup;
+$('btnViewer').onclick = async ()=>{ const r=await api().open_viewer(); if(!r.ok) toast('Сначала сделайте бэкап'); };
+$('btnFolder').onclick = ()=>api().open_dir();
+$('btnLog').onclick = ()=>api().open_log();
+$('btnPrep').onclick = ()=>doPrepare(false);
+$('btnKey').onclick = ()=>doReadKey(false);
+$('btnMore').onclick = ()=>{ showAll=!showAll; renderHistory(); };
+$('btnDetails').onclick = ()=>{ const p=$('log'); p.classList.toggle('open'); $('btnDetails').textContent=p.classList.contains('open')?'Скрыть':'Подробности'; };
+$('btnDir').onclick = async ()=>{ const r=await api().choose_dir(); if(r.error) toast(r.error); if(r.changed){ toast('Папка изменена. Старые бэкапы остались в прежней папке.'); await refresh(); } };
+async function applySchedule(){
+  const on=$('schedOn').checked, at=$('schedAt').value||'03:30'; $('schedNote').textContent='Сохраняю…';
+  const r=await api().set_schedule(on, at); if(!r.ok) toast(r.error||'Не удалось изменить расписание'); else toast(on?`Бэкап каждый день в ${at}`:'Автоматический бэкап выключен');
+  TASK=r.task; renderTask();
+}
+$('schedOn').onchange = applySchedule;
+$('schedAt').onchange = ()=>{ if($('schedOn').checked) applySchedule(); };
+setInterval(()=>{ if(S && !busy){ renderHero(); renderSources(); } }, 60000);
+
+window.addEventListener('pywebviewready', async ()=>{
+  await refresh(); refreshTask();
+  if(S.busy) setBusy(true);
+  if(S.first_run){ onboarding(); return; }
+  // Состояние источников устарело (или не проверялось) — проверить тихо в фоне
+  const pt = parseT(S.prep?.time);
+  if(!S.busy && (!pt || Date.now()-pt > 6*36e5)) doPrepare(true);
+});
+</script>
+</body>
+</html>
