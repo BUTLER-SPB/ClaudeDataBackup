@@ -44,6 +44,16 @@ def pythonw_path() -> Path:
     return cand if cand.is_file() else exe
 
 
+def task_command() -> tuple[Path, str]:
+    """Что запускает задача: оконный лаунчер claude-backup-run.exe (без консоли).
+    pythonw.exe из venv, созданного uv, — консольный лаунчер (мигает чёрное окно),
+    поэтому он только запасной вариант."""
+    run_exe = Path(sys.prefix) / "Scripts" / "claude-backup-run.exe"
+    if run_exe.is_file():
+        return run_exe, ""
+    return pythonw_path(), "-m claude_data_backup.scheduled_run"
+
+
 def valid_time(hhmm: str) -> bool:
     try:
         h, m = hhmm.strip().split(":")
@@ -52,11 +62,11 @@ def valid_time(hhmm: str) -> bool:
         return False
 
 
-def build_install_script(at: str, pythonw: Path, workdir: Path) -> str:
+def build_install_script(at: str, exe: Path, args: str, workdir: Path) -> str:
+    arg = f" -Argument {_q(args)}" if args else ""
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
-        f"$a = New-ScheduledTaskAction -Execute {_q(pythonw)} "
-        f"-Argument '-m claude_data_backup.scheduled_run' -WorkingDirectory {_q(workdir)}",
+        f"$a = New-ScheduledTaskAction -Execute {_q(exe)}{arg} -WorkingDirectory {_q(workdir)}",
         f"$t = New-ScheduledTaskTrigger -Daily -At {_q(at)}",
         "$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries "
         "-DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)",
@@ -73,7 +83,8 @@ def install(at: str = DEFAULT_TIME) -> tuple[bool, str]:
         return False, "Только Windows"
     if not valid_time(at):
         return False, f"Неверное время: {at!r} (нужно ЧЧ:ММ)"
-    r = _ps(build_install_script(at, pythonw_path(), Path.home()))
+    exe, args = task_command()
+    r = _ps(build_install_script(at, exe, args, Path.home()))
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()[-500:]
     return True, ""
@@ -123,6 +134,7 @@ def query() -> dict:
 
 def is_ours(info: dict) -> bool:
     """Задача запускает текущую установку (а не старый setup-win.ps1 / другую копию)."""
+    exe, args = task_command()
     return bool(info.get("exists")) and \
-        str(pythonw_path()).lower() == str(info.get("execute", "")).lower() and \
-        "scheduled_run" in str(info.get("arguments", ""))
+        str(exe).lower() == str(info.get("execute", "")).lower() and \
+        str(args) == str(info.get("arguments", "") or "")

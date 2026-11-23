@@ -35,7 +35,10 @@ $Base     = Join-Path $env:LOCALAPPDATA "ClaudeDataBackup"
 $AppDir   = Join-Path $Base "app"
 $VenvDir  = Join-Path $Base "venv"
 $Py       = Join-Path $VenvDir "Scripts\python.exe"
-$PyW      = Join-Path $VenvDir "Scripts\pythonw.exe"
+# GUI-subsystem launchers (no console window). Note: venv\Scripts\pythonw.exe
+# created by uv is a console launcher, so it is not used here.
+$AppExe   = Join-Path $VenvDir "Scripts\claude-backup.exe"
+$RunExe   = Join-Path $VenvDir "Scripts\claude-backup-run.exe"
 $TaskName = "ClaudeDataBackup Incremental"
 $LinkName = "Claude Backup.lnk"
 $StartLnk = Join-Path ([Environment]::GetFolderPath("Programs")) $LinkName
@@ -92,11 +95,25 @@ if ($SourceDir) {
     }
 }
 
-# 3. Python environment
+# 3. Python environment.
+# Created with the standard "python -m venv": its Scripts\pythonw.exe is a GUI
+# launcher. A venv made by "uv venv" has a console pythonw.exe, which opens a
+# black console window behind the app. Older installs (no marker) are rebuilt.
+$Marker = Join-Path $VenvDir ".stdlib-venv"
+if ((Test-Path $VenvDir) -and -not (Test-Path $Marker)) {
+    Step "Rebuilding the Python environment (old format)..."
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($VenvDir, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Remove-Item $VenvDir -Recurse -Force
+}
 if (-not (Test-Path $Py)) {
     Step "Creating Python 3.12 environment..."
-    & $UvExe venv --python 3.12 $VenvDir
-    if ($LASTEXITCODE -ne 0) { throw "uv venv failed ($LASTEXITCODE)" }
+    & $UvExe python install 3.12
+    if ($LASTEXITCODE -ne 0) { throw "uv python install failed ($LASTEXITCODE)" }
+    $BasePy = (& $UvExe python find 3.12 | Select-Object -First 1)
+    if (-not $BasePy -or -not (Test-Path $BasePy)) { throw "Python 3.12 not found after install" }
+    & $BasePy -m venv --without-pip $VenvDir
+    if ($LASTEXITCODE -ne 0) { throw "python -m venv failed ($LASTEXITCODE)" }
+    Set-Content -Path $Marker -Value "created by install.ps1" -Encoding ascii
 }
 Step "Installing the app..."
 & $UvExe pip install --python $Py --reinstall-package claude-data-backup $AppDir
@@ -107,8 +124,8 @@ $icon = & $Py -c "import claude_data_backup, pathlib; print(pathlib.Path(claude_
 $shell = New-Object -ComObject WScript.Shell
 foreach ($lnk in @($StartLnk, $DeskLnk)) {
     $s = $shell.CreateShortcut($lnk)
-    $s.TargetPath = $PyW
-    $s.Arguments = "-m claude_data_backup.app_ru"
+    $s.TargetPath = $AppExe
+    $s.Arguments = ""
     $s.WorkingDirectory = $env:USERPROFILE
     if ($icon -and (Test-Path $icon)) { $s.IconLocation = $icon }
     $s.Description = "Claude Backup"
@@ -117,10 +134,10 @@ foreach ($lnk in @($StartLnk, $DeskLnk)) {
 
 # If a daily task exists (older install), point it at this install.
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    $a = New-ScheduledTaskAction -Execute $PyW -Argument "-m claude_data_backup.scheduled_run" -WorkingDirectory $env:USERPROFILE
+    $a = New-ScheduledTaskAction -Execute $RunExe -WorkingDirectory $env:USERPROFILE
     Set-ScheduledTask -TaskName $TaskName -Action $a | Out-Null
     Step "Daily task updated to use this install."
 }
 
 Step "Done. Shortcut 'Claude Backup' is in the Start menu and on the Desktop."
-if (-not $NoLaunch) { Start-Process -FilePath $PyW -ArgumentList "-m claude_data_backup.app_ru" -WorkingDirectory $env:USERPROFILE }
+if (-not $NoLaunch) { Start-Process -FilePath $AppExe -WorkingDirectory $env:USERPROFILE }
