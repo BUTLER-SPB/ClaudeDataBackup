@@ -39,11 +39,14 @@ dev = [
 claude-data-backup = "claude_data_backup.main:main"
 claude-data-backup-gui = "claude_data_backup.gui:main"
 
+[project.gui-scripts]
+claude-backup = "claude_data_backup.app_ru:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-claude_data_backup = ["py.typed", "locales/*.json"]
+claude_data_backup = ["py.typed", "locales/*.json", "app-icon.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

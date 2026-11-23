@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.0-dev — fork BUTLER-SPB (2026-11-23)
+
+- feat: окно «Бэкап Claude» на русском (`app_ru.py`): подготовка, папка, расписание, история бэкапов; первый запуск всё делает сам
+- feat: установщик одной строкой `scripts/install.ps1` (`irm … | iex`, без админа, ярлыки, обновление повторным запуском, `-Uninstall`)
+- feat: автопоиск профиля Claude Desktop — `%APPDATA%\Claude`, MSIX `Packages\…\LocalCache`, новый MSIX `Claude-Data\claude_<id>`, `--user-data-dir` запущенного процесса (WinAPI, без PowerShell); выбранный профиль сохраняется в `config.json`
+- feat: сохранённый sessionKey (DPAPI CurrentUser) — ночной бэкап работает при открытом Claude, который блокирует Cookies; «Закрыть Claude и прочитать ключ» с повторным запуском (MSIX через AppsFolder)
+- feat: `history.jsonl` — история прогонов (вручную / по расписанию / консоль)
+- feat: `win_task.py` + `scheduled_run.py` — задача Планировщика через pythonw без консоли
+- feat: `CLAUDE_CONFIG_DIR` для сессий Claude Code
+- fix: Mode C переписывал все сессии на каждом прогоне (поиск файла по префиксу id вместо суффикса); путь проекта в manifest через `safe_name`; `00_index.md` копит строки между прогонами
+- fix: `setup-win.ps1` сохранён с BOM — Windows PowerShell 5.1 ломался на кириллице
+- tests: `tests/test_simple_app.py`
+
 ## v0.4.1 — fork BUTLER-SPB (2026-11-23)
 
 - fix: инкрементальный Mode A больше не подставляет устаревшую копию из `_raw/mode_a` для обновлённых чатов

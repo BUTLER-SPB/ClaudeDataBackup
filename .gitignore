@@ -69,3 +69,8 @@ htmlcov/
 
 # Internal dev docs (not for public repo)
 CLAUDE.md
+
+# Local run outputs (fork)
+/diag-list.json
+/*-run.json
+/run-*.json

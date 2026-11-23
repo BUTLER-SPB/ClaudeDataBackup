@@ -110,8 +110,9 @@ def needs_session_update(manifest: dict, session_id: str, last_ts: str,
     if backup_dir:
         session_dir = backup_dir / existing.get("file", "")
         if session_dir.is_dir():
-            prefix = session_id[:8]
-            if not any(f.name.startswith(prefix) and f.suffix == ".md"
+            # Файлы называются "<дата>__<заголовок>__<id8>.md" (main.write_cli_sessions)
+            suffix = "__" + session_id[:8]
+            if not any(f.stem.endswith(suffix) and f.suffix == ".md"
                        for f in session_dir.iterdir()):
                 return True
         else:

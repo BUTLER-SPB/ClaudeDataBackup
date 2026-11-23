@@ -233,10 +233,83 @@ def session_key_from_env() -> str | None:
     return sk or None
 
 
+# ---------- Сохранённый ключ (fork BUTLER-SPB) ----------
+# Запущенный Claude Desktop держит Cookies с монопольной блокировкой, поэтому
+# ночной бэкап не может прочитать куки. Ключ, прочитанный когда файл был доступен
+# (Claude закрыт или «Подготовка» перезапустила его), хранится зашифрованным:
+# Windows — DPAPI CurrentUser (расшифровать может только этот пользователь на этом ПК).
+
+def _stored_key_path() -> Path:
+    from .config import CONFIG_DIR
+    return CONFIG_DIR / "session.dpapi"
+
+
+def store_session_key(sk: str) -> bool:
+    """Сохранить ключ. Только Windows (DPAPI); на других ОС — no-op."""
+    if detect_platform() != "win" or not sk:
+        return False
+    try:
+        import win32crypt  # type: ignore
+        blob = win32crypt.CryptProtectData(
+            sk.encode("utf-8"), "ClaudeDataBackup", None, None, None, 0)
+        p = _stored_key_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(bytes(blob))
+        return True
+    except Exception as e:
+        log.warning("Не удалось сохранить sessionKey: %s", e)
+        return False
+
+
+def load_stored_session_key() -> str | None:
+    p = _stored_key_path()
+    if detect_platform() != "win" or not p.is_file():
+        return None
+    try:
+        import win32crypt  # type: ignore
+        _desc, data = win32crypt.CryptUnprotectData(p.read_bytes(), None, None, None, 0)
+        sk = bytes(data).decode("utf-8")
+        return sk if _valid_looking(sk) else None
+    except Exception as e:
+        log.warning("Сохранённый sessionKey не читается: %s", e)
+        return None
+
+
+def stored_key_info() -> dict:
+    p = _stored_key_path()
+    if not p.is_file():
+        return {"present": False}
+    from datetime import datetime
+    return {"present": True,
+            "saved_at": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")}
+
+
+def forget_stored_session_key() -> None:
+    _stored_key_path().unlink(missing_ok=True)
+
+
+def is_lock_error(err: BaseException | str) -> bool:
+    s = str(err)
+    return "WinError 32" in s or "заблокирован" in s or "being used by another process" in s
+
+
+def read_session_key_from_desktop() -> tuple[str | None, str | None]:
+    """Прочитать ключ из куки Desktop. Возвращает (ключ, ошибка).
+    Ошибка "locked" — файл занят запущенным Claude."""
+    try:
+        sk = _session_key_from_cookie_db()
+    except NoSessionCookie:
+        return None, "not_found"
+    except (sqlite3.Error, OSError, RuntimeError) as e:
+        return None, ("locked" if is_lock_error(e) else str(e))
+    return sk, (None if sk else "decrypt_failed")
+
+
 def get_session_key() -> str | None:
     """拿到 claude.ai 的 sessionKey。拿不到返回 None，不抛异常。
 
-    Порядок: CLAUDE_SESSION_KEY → cookie Claude Desktop.
+    Порядок: CLAUDE_SESSION_KEY → cookie Claude Desktop (свежий ключ сразу
+    сохраняется) → сохранённый ранее ключ.
     """
     env_sk = session_key_from_env()
     if env_sk:
@@ -244,10 +317,34 @@ def get_session_key() -> str | None:
         return env_sk
 
     try:
-        rows, db_version = _read_cookie_db()
+        sk = _session_key_from_cookie_db()
+    except NoSessionCookie:
+        # Куки читаются, но входа нет: пользователь вышел из аккаунта в Desktop.
+        # Старый сохранённый ключ не используем — он мог быть от другого входа.
+        log.warning("В Claude Desktop нет входа в claude.ai — сохранённый ключ удалён")
+        forget_stored_session_key()
+        return None
     except (sqlite3.Error, OSError, RuntimeError) as e:
         log.warning(_("cookies.read_error", error=str(e)))
-        return None
+        sk = None
+    if sk:
+        store_session_key(sk)
+        return sk
+
+    stored = load_stored_session_key()
+    if stored:
+        log.info("sessionKey взят из сохранённого (%s)", _stored_key_path())
+    return stored
+
+
+class NoSessionCookie(Exception):
+    """Cookies DB прочитана, но cookie sessionKey для claude.ai нет (нет входа)."""
+
+
+def _session_key_from_cookie_db() -> str | None:
+    """Ключ из Cookies DB. Ошибки чтения файла пробрасываются вызывающему;
+    отсутствие cookie — NoSessionCookie; None — cookie есть, но не расшифровалась."""
+    rows, db_version = _read_cookie_db()
 
     target = [
         (h, n, v) for (h, n, v) in rows
@@ -255,7 +352,7 @@ def get_session_key() -> str | None:
     ]
     if not target:
         log.debug(_("cookies.not_found"))
-        return None
+        raise NoSessionCookie()
     log.debug("Cookies DB version=%d, sessionKey записей: %d", db_version, len(target))
 
     platform = detect_platform()
@@ -311,7 +408,9 @@ def describe_cookie_state() -> dict:
         r["cookies_readable"] = False
         r["has_session_key"] = False
         r["error"] = f"sqlite error: {e}"
-    if r["env_override"]:
+    r["locked"] = bool(r.get("error")) and is_lock_error(r["error"])
+    r["stored_key"] = stored_key_info()
+    if r["env_override"] or r["stored_key"]["present"]:
         r["has_session_key"] = True
     return r
 
@@ -322,7 +421,6 @@ if __name__ == "__main__":
     print(_json.dumps(describe_cookie_state(), ensure_ascii=False, indent=2))
     sk = get_session_key()
     if sk:
-        safe = sk.encode("ascii", errors="replace").decode("ascii")
-        print(f"--- sessionKey: {safe[:12]}...{safe[-6:]} (len={len(sk)}) ---")
+        print(f"--- sessionKey: найден (len={len(sk)}) ---")
     else:
         print("--- sessionKey: None (未登录/解密失败/账号不可用) ---")
