@@ -13,6 +13,7 @@ import json
 import sys
 import traceback
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -25,6 +26,7 @@ from . import cli_exporter
 from . import renderer
 from . import config as cfg
 from . import manifest as mf
+from . import history
 from .i18n import t as _, init_language, save_language_preference
 from .log import setup_logging, get_logger
 from .html_viewer import generate_html as generate_html_viewer
@@ -39,6 +41,8 @@ EXIT_ERROR = 1
 EXIT_INVALID_ARGS = 2
 EXIT_AUTH_FAILURE = 3
 EXIT_PARTIAL = 4
+
+CLI_INDEX_ROWS = "_index_rows.json"   # накопленные строки claude-code/00_index.md
 
 _SUBCOMMANDS = {"capabilities", "list", "status"}
 
@@ -322,7 +326,13 @@ def write_cli_sessions(out_root: Path,
     real_dir = base / "real"
     real_dir.mkdir(parents=True, exist_ok=True)
 
-    rows: list[dict] = []
+    # Строки индекса копятся между инкрементальными прогонами (fork BUTLER-SPB):
+    # иначе 00_index.md содержал бы только сессии последнего прогона.
+    rows_file = base / CLI_INDEX_ROWS
+    try:
+        all_rows: dict[str, dict] = json.loads(rows_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        all_rows = {}
 
     for s in sessions:
         proj_out = real_dir / renderer.safe_name(s.project, 80)
@@ -334,14 +344,15 @@ def write_cli_sessions(out_root: Path,
         md_path.write_text(renderer.render_cli_session(s), encoding="utf-8")
         renderer.hardlink_or_copy(s.source_path, jsonl_path)
 
-        rows.append({
+        all_rows[s.session_id] = {
             "date": date, "project": s.project, "title": s.title,
             "user_turns": s.user_turns, "asst_turns": s.assistant_turns,
             "events": s.total_events, "model": s.model,
             "path": str(md_path.relative_to(base)),
-        })
+        }
 
-    rows.sort(key=lambda r: (r["project"], r["date"]), reverse=True)
+    rows_file.write_text(json.dumps(all_rows, ensure_ascii=False), encoding="utf-8")
+    rows = sorted(all_rows.values(), key=lambda r: (r["project"], r["date"]), reverse=True)
     lines = [
         f"# {_('renderer.cli_index_title')}",
         "",
@@ -358,8 +369,8 @@ def write_cli_sessions(out_root: Path,
             f"`{r['model']}` | [{_('renderer.open')}]({r['path']}) |"
         )
     (base / "00_index.md").write_text("\n".join(lines), encoding="utf-8")
-    logger(_("main.write_cli", count=len(rows)))
-    return len(rows)
+    logger(_("main.write_cli", count=len(sessions)))
+    return len(sessions)
 
 
 # ---------- 主入口 ----------
@@ -491,10 +502,13 @@ def _incremental_mode_c(backup_dir: Path, manifest: dict,
     logger(msg)
     log.info(msg)
 
+    # Нет накопленного индекса (первый прогон новой версии) — переписать всё один раз,
+    # чтобы 00_index.md стал полным.
+    rebuild = not (backup_dir / "claude-code" / CLI_INDEX_ROWS).is_file()
     new_sessions: list[cli_exporter.SessionData] = []
     for s in cli_exporter.iter_sessions(skip_observer=True):
-        if not mf.needs_session_update(manifest, s.session_id, s.last_ts or "",
-                                     backup_dir=backup_dir):
+        if not rebuild and not mf.needs_session_update(
+                manifest, s.session_id, s.last_ts or "", backup_dir=backup_dir):
             continue
         new_sessions.append(s)
 
@@ -505,8 +519,39 @@ def _incremental_mode_c(backup_dir: Path, manifest: dict,
                            "real": sum(1 for s in new_sessions if s.category == "real")}
 
 
+class BackupBusy(RuntimeError):
+    """В этой папке уже идёт другой бэкап (окно, расписание или консоль)."""
+
+
+@contextmanager
+def _backup_lock(backup_dir: Path):
+    """Межпроцессная блокировка папки бэкапа. Снимается ОС при завершении процесса."""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    f = open(backup_dir / ".backup.lock", "a+b")
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise BackupBusy("Бэкап в эту папку уже выполняется другим процессом") from e
+        yield
+    finally:
+        f.close()
+
+
 def run_incremental(backup_dir: Path, modes: str,
                     logger: Callable[[str], None]) -> dict:
+    with _backup_lock(backup_dir):
+        return _run_incremental(backup_dir, modes, logger)
+
+
+def _run_incremental(backup_dir: Path, modes: str,
+                     logger: Callable[[str], None]) -> dict:
     """增量备份主流程。
 
     1. 加载 manifest
@@ -515,9 +560,10 @@ def run_incremental(backup_dir: Path, modes: str,
     4. 更新 manifest
     """
     log.info("run_incremental() 开始: dir=%s, modes=%s", backup_dir, modes)
+    started = datetime.now()
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest = mf.load_manifest(backup_dir)
-    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    when = started.strftime("%Y-%m-%d %H:%M:%S")
     stats: dict = {
         "version": __version__,
         "run_time": when,
@@ -583,7 +629,8 @@ def run_incremental(backup_dir: Path, modes: str,
                 "first_ts": s.first_ts or "",
                 "last_ts": s.last_ts or "",
                 "source": "cli_log",
-                "file": f"claude-code/{s.category}/{s.project}",
+                # тот же safe_name, что и в write_cli_sessions
+                "file": f"claude-code/{s.category}/{renderer.safe_name(s.project, 80)}",
             })
 
     # 保存 manifest
@@ -613,6 +660,8 @@ def run_incremental(backup_dir: Path, modes: str,
 
     generate_html_viewer(backup_dir, logger, file_map=file_map)
     logger(_("main.complete_incremental", dir=str(backup_dir)))
+    history.append(backup_dir, history.make_record(
+        stats, _determine_exit_code(stats, modes), started))
     return stats
 
 
@@ -962,6 +1011,7 @@ def main():
         def logger(msg):
             print(msg, flush=True)
 
+    run_started = datetime.now()
     try:
         if args.incremental:
             backup_dir = cfg.get_backup_dir()
@@ -973,8 +1023,18 @@ def main():
             log.info("一次性导出目录: %s", out)
             stats = run(out, modes, logger)
             save_language_preference(out)
+    except BackupBusy as e:
+        log.warning("%s", e)
+        if args.json:
+            _emit_json({"error": str(e)}, file=sys.stderr)
+        else:
+            print(str(e), file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     except Exception:
         log.critical("CLI 执行失败", exc_info=True)
+        if args.incremental:
+            history.append(cfg.get_backup_dir(), history.make_record(
+                None, EXIT_ERROR, run_started, error=traceback.format_exc()))
         if args.json:
             _emit_json({"error": traceback.format_exc()}, file=sys.stderr)
         else:
@@ -1008,6 +1068,10 @@ def main():
           f" (real={stats['mode_c'].get('real', 0)})")
     if not args.incremental:
         print(_("cli.output_label", dir=str(args.output or _default_output_dir())))
+    # Код возврата и без --json: по нему Планировщик показывает результат ночного запуска
+    exit_code = _determine_exit_code(stats, modes)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def _determine_exit_code(stats: dict, modes: str) -> int:

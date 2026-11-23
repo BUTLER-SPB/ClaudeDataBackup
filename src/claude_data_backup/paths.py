@@ -6,7 +6,8 @@
 """
 from __future__ import annotations
 import functools
-import os, sys, subprocess
+import os, re, sys, subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -95,33 +96,329 @@ def detect_system_proxy() -> dict[str, str]:
     return {}
 
 
-def _claude_desktop_root() -> Path:
-    """Claude Desktop 应用数据根目录。"""
+# ──────────────────────────────────────────────
+# Автопоиск профиля Claude Desktop (fork BUTLER-SPB)
+#
+# У разных пользователей профиль лежит в разных местах:
+#   %APPDATA%\Claude                                   — классический установщик
+#   %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude — MSIX (старые сборки)
+#   %LOCALAPPDATA%\Claude-Data\claude_<family>         — MSIX (новые сборки, --user-data-dir)
+#   %LOCALAPPDATA%\Claude-3p и пр.                      — другие варианты сборок
+# Порядок выбора: профиль запущенного Claude (--user-data-dir) → сохранённый
+# «Подготовкой» в config.json → самый свежий по Cookies среди найденных.
+# ──────────────────────────────────────────────
+
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+
+@dataclass
+class DesktopProfile:
+    path: Path
+    source: str                 # "process" | "config" | "scan"
+    cookies_path: Path | None
+    cookies_mtime: float
+    has_local_state: bool
+    has_cache: bool
+
+    @property
+    def usable(self) -> bool:
+        return self.has_local_state and self.cookies_path is not None
+
+    def to_dict(self) -> dict:
+        return {
+            "path": str(self.path),
+            "source": self.source,
+            "cookies_path": str(self.cookies_path) if self.cookies_path else None,
+            "cookies_mtime": self.cookies_mtime,
+            "has_local_state": self.has_local_state,
+            "has_cache": self.has_cache,
+            "usable": self.usable,
+        }
+
+
+def _profile_info(path: Path, source: str) -> DesktopProfile:
+    cookies = None
+    mtime = 0.0
+    for c in (path / "Network" / "Cookies", path / "Cookies"):
+        if c.is_file():
+            cookies = c
+            try:
+                mtime = c.stat().st_mtime
+            except OSError:
+                pass
+            break
+    return DesktopProfile(
+        path=path,
+        source=source,
+        cookies_path=cookies,
+        cookies_mtime=mtime,
+        has_local_state=(path / "Local State").is_file(),
+        has_cache=(path / "Cache" / "Cache_Data").is_dir(),
+    )
+
+
+def _scan_profile_dirs() -> list[Path]:
+    """Все каталоги, похожие на профиль Claude Desktop (есть «Local State»)."""
+    p = detect_platform()
+    roots: list[Path] = []
+    if p == "win":
+        for var in ("APPDATA", "LOCALAPPDATA"):
+            v = os.environ.get(var)
+            if v:
+                roots.append(Path(v))
+    elif p == "mac":
+        roots.append(Path.home() / "Library" / "Application Support")
+    else:
+        roots.append(Path.home() / ".config")
+
+    found: list[Path] = []
+
+    def consider(d: Path) -> None:
+        if (d / "Local State").is_file() and d not in found:
+            found.append(d)
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for d in entries:
+            if not d.is_dir() or not d.name.lower().startswith("claude"):
+                continue
+            consider(d)
+            # Claude-Data\claude_<family> и подобные — на уровень глубже
+            try:
+                for sub in d.iterdir():
+                    if sub.is_dir():
+                        consider(sub)
+            except OSError:
+                pass
+
+    # MSIX: %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude*
+    if p == "win":
+        la = os.environ.get("LOCALAPPDATA")
+        pkgs = Path(la) / "Packages" if la else None
+        if pkgs and pkgs.is_dir():
+            try:
+                for d in pkgs.iterdir():
+                    if not d.name.lower().startswith("claude"):
+                        continue
+                    roaming = d / "LocalCache" / "Roaming"
+                    if roaming.is_dir():
+                        for sub in roaming.iterdir():
+                            if sub.is_dir() and sub.name.lower().startswith("claude"):
+                                consider(sub)
+            except OSError:
+                pass
+    return found
+
+
+_RUNNING_CACHE: list[Path] | None = None
+
+
+def _running_profile_dirs() -> list[Path]:
+    """--user-data-dir запущенных процессов Claude Desktop (кэш на процесс)."""
+    global _RUNNING_CACHE
+    if _RUNNING_CACHE is None:
+        _RUNNING_CACHE = _probe_running_profile_dirs()
+    return list(_RUNNING_CACHE)
+
+
+def _probe_running_profile_dirs() -> list[Path]:
+    if detect_platform() != "win":
+        return []
+    dirs: list[Path] = []
+    for proc in list_desktop_processes():
+        m = re.search(r'--user-data-dir=(?:"([^"]+)"|(\S+))', proc.cmdline)
+        if m:
+            d = Path(m.group(1) or m.group(2))
+            if d.is_dir() and d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
+@dataclass
+class ProcInfo:
+    pid: int
+    exe: str
+    cmdline: str
+
+    @property
+    def is_main(self) -> bool:
+        """Главный (browser) процесс Electron — без --type=."""
+        return "--type=" not in self.cmdline
+
+
+def _is_desktop_exe(exe: str) -> bool:
+    """Claude Desktop — Electron: рядом с exe лежит resources\\. Так отсекаем
+    одноимённый claude.exe от Claude Code CLI (~/.local/bin/claude.exe)."""
+    if not exe:
+        return False
+    return (Path(exe).parent / "resources").is_dir()
+
+
+def list_desktop_processes() -> list[ProcInfo]:
+    """Процессы Claude Desktop текущего пользователя (Windows, WinAPI без PowerShell)."""
+    if detect_platform() != "win":
+        return []
+    try:
+        return [p for p in _win_list_processes("claude.exe") if _is_desktop_exe(p.exe)]
+    except Exception:
+        return []
+
+
+def _win_list_processes(image_name: str) -> list[ProcInfo]:
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT),
+                    ("Buffer", ctypes.c_void_p)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong)]
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ProcessCommandLineInformation = 60
+    INVALID = wintypes.HANDLE(-1).value
+
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == INVALID:
+        return []
+    pids: list[int] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.szExeFile.lower() == image_name.lower():
+                pids.append(int(entry.th32ProcessID))
+            ok = k32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+
+    out: list[ProcInfo] = []
+    for pid in pids:
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            continue
+        try:
+            size = wintypes.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(1024)
+            exe = buf.value if k32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size)) else ""
+            need = ctypes.c_ulong(0)
+            ntdll.NtQueryInformationProcess(h, ProcessCommandLineInformation,
+                                            None, 0, ctypes.byref(need))
+            cmdline = ""
+            if need.value:
+                raw = ctypes.create_string_buffer(need.value)
+                st = ntdll.NtQueryInformationProcess(
+                    h, ProcessCommandLineInformation, raw, need.value, ctypes.byref(need))
+                if st >= 0:
+                    us = UNICODE_STRING.from_buffer(raw)
+                    if us.Buffer and us.Length:
+                        cmdline = ctypes.wstring_at(us.Buffer, us.Length // 2)
+            out.append(ProcInfo(pid=pid, exe=exe, cmdline=cmdline))
+        finally:
+            k32.CloseHandle(h)
+    return out
+
+
+def _configured_profile_dir() -> Path | None:
+    try:
+        from .config import load_config
+        v = load_config().get("desktop_profile_dir")
+    except Exception:
+        return None
+    return Path(v) if v else None
+
+
+def discover_desktop_profiles() -> list[DesktopProfile]:
+    """Все найденные профили, лучший — первым."""
+    seen: dict[str, DesktopProfile] = {}
+    ordered: list[DesktopProfile] = []
+
+    def add(path: Path, source: str) -> None:
+        key = str(path).lower()
+        if key in seen:
+            return
+        info = _profile_info(path, source)
+        seen[key] = info
+        ordered.append(info)
+
+    for d in _running_profile_dirs():
+        add(d, "process")
+    cfg_dir = _configured_profile_dir()
+    if cfg_dir and cfg_dir.is_dir():
+        add(cfg_dir, "config")
+    for d in sorted(_scan_profile_dirs(),
+                    key=lambda d: _profile_info(d, "scan").cookies_mtime,
+                    reverse=True):
+        add(d, "scan")
+
+    priority = {"process": 0, "config": 1, "scan": 2}
+    # Сначала годные (Cookies + Local State), внутри — по источнику и свежести
+    ordered.sort(key=lambda p: (not p.usable, priority[p.source], -p.cookies_mtime))
+    return ordered
+
+
+_ROOT_CACHE: Path | None = None
+
+
+def reset_desktop_root_cache() -> None:
+    global _ROOT_CACHE, _RUNNING_CACHE
+    _ROOT_CACHE = None
+    _RUNNING_CACHE = None
+
+
+def _legacy_default_root() -> Path:
     p = detect_platform()
     if p == "mac":
         return Path.home() / "Library" / "Application Support" / "Claude"
     if p == "win":
-        # 标准安装路径
         appdata = os.environ.get("APPDATA")
-        if appdata:
-            standard = Path(appdata) / "Claude"
-            if standard.is_dir():
-                return standard
-        # Microsoft Store 安装路径（UWP 应用数据在 LocalAppData\Packages\ 下）
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            packages_dir = Path(local_appdata) / "Packages"
-            if packages_dir.is_dir():
-                for d in packages_dir.iterdir():
-                    if d.name.lower().startswith("claude_"):
-                        candidate = d / "LocalCache" / "Roaming" / "Claude"
-                        if candidate.is_dir():
-                            return candidate
-        # 都没找到，返回标准路径（让调用方报错信息更清晰）
         if appdata:
             return Path(appdata) / "Claude"
         raise RuntimeError("Windows 上 %APPDATA% 和 %LOCALAPPDATA% 环境变量均为空")
     return Path.home() / ".config" / "Claude"
+
+
+def _claude_desktop_root() -> Path:
+    """Claude Desktop 应用数据根目录 (автопоиск, результат кэшируется на процесс)."""
+    global _ROOT_CACHE
+    if _ROOT_CACHE is not None:
+        return _ROOT_CACHE
+    profiles = discover_desktop_profiles()
+    if profiles:
+        _ROOT_CACHE = profiles[0].path
+        return _ROOT_CACHE
+    # 都没找到，返回标准路径（让调用方报错信息更清晰）
+    return _legacy_default_root()
 
 
 def claude_desktop_installed() -> bool:
@@ -163,9 +460,19 @@ def claude_desktop_local_state_path() -> Path:
     return p
 
 
+def _cli_projects_candidate() -> Path:
+    """Каталог проектов Claude Code: учитывает CLAUDE_CONFIG_DIR, иначе ~/.claude."""
+    env = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if env:
+        d = Path(env).expanduser() / "projects"
+        if d.is_dir():
+            return d
+    return Path.home() / ".claude" / "projects"
+
+
 def claude_cli_projects_dir() -> Path:
     """~/.claude/projects/ —— Claude Code 本地会话日志目录。"""
-    d = Path.home() / ".claude" / "projects"
+    d = _cli_projects_candidate()
     if not d.is_dir():
         raise FileNotFoundError(f"Claude Code 项目目录不存在: {d}")
     return d
@@ -173,7 +480,7 @@ def claude_cli_projects_dir() -> Path:
 
 def claude_cli_projects_dir_optional() -> Path | None:
     """同上，但不存在时返回 None 而不是抛异常（用户可能没装 Claude Code CLI）。"""
-    d = Path.home() / ".claude" / "projects"
+    d = _cli_projects_candidate()
     return d if d.is_dir() else None
 
 
@@ -181,6 +488,7 @@ def report() -> dict:
     """一次性诊断报告：所有关键路径的状态。用于启动时日志 + GUI 展示。"""
     r: dict = {"platform": detect_platform()}
     r["claude_desktop_root"] = str(_claude_desktop_root())
+    r["desktop_profiles"] = [p.to_dict() for p in discover_desktop_profiles()]
     r["claude_desktop_installed"] = claude_desktop_installed()
     for name, fn in [
         ("cache_dir", claude_desktop_cache_dir),
@@ -287,12 +595,19 @@ def _find_win_claude_exe() -> Path | None:
         if c.is_file():
             return c
 
+    # Запущенный Claude Desktop — точный путь к exe без PowerShell
+    for proc in list_desktop_processes():
+        if proc.exe and Path(proc.exe).is_file():
+            return Path(proc.exe)
+
     # Microsoft Store 安装：通过 Get-AppxPackage 查找
     try:
         result = subprocess.run(
-            ["powershell", "-Command",
+            ["powershell", "-NoProfile", "-Command",
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
              "(Get-AppxPackage -Name '*Claude*' | Select-Object -First 1).InstallLocation"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, creationflags=_NO_WINDOW,
         )
         if result.returncode == 0 and result.stdout.strip():
             install_dir = Path(result.stdout.strip())
@@ -342,10 +657,12 @@ def _detect_win_claude_info() -> dict[str, str | None]:
 
     if not info["claude_version"]:
         try:
+            lit = "'" + re.sub("['‘’‚‛]",
+                               lambda m: m.group() * 2, str(exe_path)) + "'"
             result = subprocess.run(
-                ["powershell", "-Command",
-                 f'(Get-Item "{exe_path}").VersionInfo.FileVersion'],
-                capture_output=True, text=True, timeout=10,
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Item -LiteralPath {lit}).VersionInfo.FileVersion"],
+                capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
             )
             if result.returncode == 0 and result.stdout.strip():
                 info["claude_version"] = result.stdout.strip()
