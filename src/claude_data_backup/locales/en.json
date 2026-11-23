@@ -68,7 +68,7 @@
   "cli.schedule_unsupported_platform": "Auto-backup not supported on this platform",
 
   "main.mode_a_trying": "[Mode A] Attempting to get sessionKey from Keychain / DPAPI ...",
-  "main.mode_a_no_key": "[Mode A] No valid sessionKey (account may be logged out or banned). Skipping.",
+  "main.mode_a_no_key": "[Mode A] No valid sessionKey (logged out / banned / decryption failed). Tip: set CLAUDE_SESSION_KEY. Skipping.",
   "main.mode_a_checking": "[Mode A] Verifying sessionKey validity ...",
   "main.mode_a_invalid": "[Mode A] sessionKey is invalid (account may be banned). Skipping.",
   "main.mode_a_no_org": "[Mode A] No organization found under account. Skipping.",
@@ -330,5 +330,11 @@
   "exit.error": "Runtime error occurred",
   "exit.invalid_args": "Invalid arguments",
   "exit.auth_failure": "Authentication failure (no valid sessionKey)",
-  "exit.partial": "Partial success (some modes failed)"
+  "exit.partial": "Partial success (some modes failed)",
+
+  "cookies.v20_unsupported": "sessionKey cookie uses App-Bound Encryption (v20), which cannot be decrypted. Set the {env} environment variable instead.",
+  "cookies.env_override": "sessionKey taken from the {env} environment variable",
+  "main.mode_a_orgs": "[Mode A] Organizations to back up: {n}",
+  "main.mode_a_projects": "[Mode A] Project knowledge saved: {projects} projects, {docs} documents",
+  "main.mode_a_project_fail": "[Mode A] Project '{name}' knowledge not saved: {error}"
 }

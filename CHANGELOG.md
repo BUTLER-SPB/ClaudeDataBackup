@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.1 — fork xmaxzzz (2026-11-23)
+
+- fix: инкрементальный Mode A больше не подставляет устаревшую копию из `_raw/mode_a` для обновлённых чатов
+- feat: обход всех организаций с capability `chat` (раньше только `orgs[0]`)
+- feat: пагинация `chat_conversations` (limit/offset, дедуп, fallback на запрос без параметров)
+- feat: бэкап знаний проектов → `project-knowledge/<org>/<project>/` (INSTRUCTIONS.md, docs/, project.json)
+- feat: `CLAUDE_SESSION_KEY` — ручной sessionKey
+- fix: cookie — SHA256(host_key)-префикс снимается по версии Cookies DB (>=24) с проверкой хэша; явная ошибка для v20
+- feat: `scripts/setup-win.ps1` (uv + Планировщик задач без админа), `README_RU.md`
+- tests: `tests/test_fork.py`
+- Python 3.13 разрешён
+
 ## v0.4.0 (2026-05-28)
 
 ### Agent-Driven Backup（Agent 可调用的 CLI 模式）

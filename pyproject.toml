@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-data-backup"
-version = "0.4.0"
+version = "0.4.1"
 description = "Cross-platform backup tool for Claude data: live API backup + HTTP cache mining + Claude Code CLI session export."
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Raven (Fang Xu)", email = "raven940309@gmail.com" }]
 keywords = ["claude", "anthropic", "backup", "export", "data"]

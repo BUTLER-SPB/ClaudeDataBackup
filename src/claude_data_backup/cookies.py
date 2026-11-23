@@ -1,22 +1,29 @@
 """Cookie 解密 —— 从 Claude Desktop Cookies SQLite 库里拿到 sessionKey。
 
 Mac 和 Win 走不同路径取 AES key（Keychain vs DPAPI + Local State）。
-两个平台都用 Chromium 的标准加密格式解密 cookie value（v10/v11 AES-GCM）。
+两个平台都用 Chromium 的标准加密格式解密 cookie value（v10/v11）。
 
-**关键不确定项**：Claude Desktop Electron 是否 100% 沿用 Chromium 标准流程。
-- Keychain 服务名在 Mac 上有多个候选，会依次尝试。
-- Windows 上 encrypted_key 的 DPAPI 解密理论上标准，但未实测。
+Fork changes (xmaxzzz):
+- Переопределение через переменную окружения CLAUDE_SESSION_KEY (fallback, если
+  Desktop не установлен / расшифровка не работает / нужен другой аккаунт).
+- 32-байтовый префикс — это не App-Bound Encryption, а SHA256(host_key), который
+  Chromium добавляет к значению начиная с версии схемы Cookies DB 24. Теперь префикс
+  снимается только при meta.version >= 24 и с проверкой хэша (Mac и Win одинаково).
+- v20 (App-Bound Encryption) распознаётся явно с понятной ошибкой.
+- Ошибки копирования заблокированного файла БД не роняют процесс.
 
 设计原则：任何异常都捕获并返回 None，不打断主流程。
 """
 from __future__ import annotations
 import base64
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
-from typing import Iterable
 
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
@@ -33,6 +40,9 @@ log = get_logger(__name__)
 
 CLAUDE_HOSTS = ("claude.ai", ".claude.ai", ".claude.com")
 SESSION_KEY_NAME = "sessionKey"
+SESSION_KEY_ENV = "CLAUDE_SESSION_KEY"
+# Начиная с этой версии схемы Chromium добавляет SHA256(host_key) перед значением
+HOST_HASH_DB_VERSION = 24
 
 # macOS Keychain 服务名候选（Chromium-family 应用都叫 "<Name> Safe Storage"）
 MAC_KEYCHAIN_SVCES = [
@@ -42,46 +52,85 @@ MAC_KEYCHAIN_SVCES = [
     "Anthropic Claude Safe Storage",
 ]
 
+_SQL = ("SELECT host_key, name, encrypted_value FROM cookies "
+        "WHERE host_key LIKE '%claude.ai' OR host_key LIKE '%claude.com'")
+
 
 # ---------- 低层 ----------
 
-def _read_encrypted_cookies() -> list[tuple[str, str, bytes]]:
-    """从 Cookies 库读出所有 claude.ai 域的 cookie。
+def _query_db(conn: sqlite3.Connection) -> tuple[list[tuple[str, str, bytes]], int]:
+    rows = [(h, n, v) for h, n, v in conn.execute(_SQL).fetchall()]
+    version = 0
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()
+        if row:
+            version = int(row[0])
+    except (sqlite3.Error, ValueError, TypeError):
+        pass
+    return rows, version
 
-    返回 list of (host_key, name, encrypted_value)。
-    Windows 上 Claude Desktop（UWP）会锁住数据库，需要先复制到临时文件再读。
+
+def _read_cookie_db() -> tuple[list[tuple[str, str, bytes]], int]:
+    """Прочитать cookie claude.ai и версию схемы БД.
+
+    Windows: Claude Desktop держит файл открытым — читаем копию во временном файле.
     """
-    import shutil
-    import tempfile
-
     db_path = claude_desktop_cookies_path()
 
-    # Windows: 先复制一份，绕过 Claude Desktop 的文件锁
     if detect_platform() == "win":
-        with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        shutil.copy2(db_path, tmp_path)
+        fd, tmp_name = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
         try:
+            try:
+                shutil.copy2(db_path, tmp_path)
+            except PermissionError as e:
+                raise sqlite3.OperationalError(
+                    f"Cookies DB заблокирован ({e}). Закройте Claude Desktop "
+                    f"или задайте {SESSION_KEY_ENV}"
+                ) from e
             conn = sqlite3.connect(str(tmp_path))
-            cur = conn.execute(
-                "SELECT host_key, name, encrypted_value FROM cookies "
-                "WHERE host_key LIKE '%claude.ai' OR host_key LIKE '%claude.com'"
-            )
-            return [(h, n, v) for h, n, v in cur.fetchall()]
+            try:
+                return _query_db(conn)
+            finally:
+                conn.close()
         finally:
-            conn.close()
             tmp_path.unlink(missing_ok=True)
-    else:
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
-        try:
-            cur = conn.execute(
-                "SELECT host_key, name, encrypted_value FROM cookies "
-                "WHERE host_key LIKE '%claude.ai' OR host_key LIKE '%claude.com'"
-            )
-            return [(h, n, v) for h, n, v in cur.fetchall()]
-        finally:
-            conn.close()
+
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return _query_db(conn)
+    finally:
+        conn.close()
+
+
+def _read_encrypted_cookies() -> list[tuple[str, str, bytes]]:
+    """Совместимость: list of (host_key, name, encrypted_value)."""
+    return _read_cookie_db()[0]
+
+
+def _strip_host_hash(plaintext: bytes, host_key: str, db_version: int) -> bytes:
+    """Снять 32-байтовый SHA256(host_key) префикс (Chromium DB version >= 24)."""
+    if len(plaintext) < 32:
+        return plaintext
+    # Совпадение хэша — надёжный признак независимо от версии (meta мог не прочитаться)
+    if host_key and plaintext[:32] == hashlib.sha256(host_key.encode("utf-8")).digest():
+        return plaintext[32:]
+    if db_version < HOST_HASH_DB_VERSION:
+        return plaintext
+    # Версия говорит, что префикс должен быть, но хэш не совпал — всё равно режем,
+    # это поведение upstream, которое было проверено на Windows.
+    log.debug("host hash mismatch для %s, режу 32 байта по версии БД %d",
+              host_key, db_version)
+    return plaintext[32:]
+
+
+def _plain_or_none(enc_value: bytes) -> str | None:
+    try:
+        return enc_value.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 # ---------- macOS ----------
@@ -99,33 +148,28 @@ def _mac_find_safe_storage_key() -> bytes | None:
                 log.debug("Keychain 服务名 '%s' 匹配成功", svce)
                 # PBKDF2 派生：saltysalt, 1003 迭代, 16 字节
                 return PBKDF2(out, b"saltysalt", dkLen=16, count=1003)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             continue
     log.warning("所有 Keychain 服务名均未匹配: %s", MAC_KEYCHAIN_SVCES)
     return None
 
 
-def _mac_decrypt(enc_value: bytes, key: bytes) -> str | None:
-    """Mac Chromium cookie 解密。兼容 v10（AES-CBC）和 v11 等变体。"""
+def _mac_decrypt(enc_value: bytes, key: bytes, host_key: str = "",
+                 db_version: int = 0) -> str | None:
+    """Mac Chromium cookie 解密：v10/v11 = AES-128-CBC, IV = 16 пробелов."""
     if not enc_value:
         return None
-    # 如果不是 v10/v11 开头，可能是明文
     if enc_value[:3] not in (b"v10", b"v11"):
-        try:
-            return enc_value.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    # v10 / v11：AES-128-CBC, IV = 16 spaces
+        return _plain_or_none(enc_value)
     try:
-        iv = b" " * 16
-        cipher = AES.new(key, AES.MODE_CBC, iv)
+        cipher = AES.new(key, AES.MODE_CBC, b" " * 16)
         decrypted = cipher.decrypt(enc_value[3:])
-        # PKCS7 去 padding
         pad_len = decrypted[-1]
         if 1 <= pad_len <= 16:
             decrypted = decrypted[:-pad_len]
-        return decrypted.decode("utf-8", errors="replace")
-    except (ValueError, IndexError):
+        decrypted = _strip_host_hash(decrypted, host_key, db_version)
+        return decrypted.decode("utf-8")
+    except (ValueError, IndexError, UnicodeDecodeError):
         return None
 
 
@@ -136,58 +180,73 @@ def _win_load_master_key() -> bytes | None:
     try:
         import win32crypt  # type: ignore
     except ImportError:
+        log.warning("pywin32 не установлен — DPAPI недоступен")
         return None
     try:
         local_state = json.loads(
             claude_desktop_local_state_path().read_text(encoding="utf-8")
         )
-        encrypted_key_b64 = local_state["os_crypt"]["encrypted_key"]
-        encrypted_key = base64.b64decode(encrypted_key_b64)
-        # 去掉前 5 字节的 "DPAPI" 标记
+        os_crypt = local_state.get("os_crypt", {})
+        if os_crypt.get("app_bound_encrypted_key"):
+            log.info("Local State содержит app_bound_encrypted_key (v20 возможен)")
+        encrypted_key = base64.b64decode(os_crypt["encrypted_key"])
         if encrypted_key[:5] != b"DPAPI":
+            log.warning("encrypted_key без префикса DPAPI")
             return None
-        encrypted_key = encrypted_key[5:]
-        _, key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)
+        _, key = win32crypt.CryptUnprotectData(encrypted_key[5:], None, None, None, 0)
         return bytes(key)
-    except (FileNotFoundError, KeyError, ValueError, OSError):
+    except Exception as e:  # pywintypes.error не наследует OSError
+        log.warning("Не удалось получить master key: %s", e)
         return None
 
 
-def _win_decrypt(enc_value: bytes, key: bytes) -> str | None:
-    """Win Chromium v10/v11 AES-GCM cookie 解密。
-
-    解密后的明文前 32 字节是 Chromium 的内部前缀（可能是 app-bound encryption 的 nonce），
-    需要跳过才是实际的 cookie 值。
-    """
+def _win_decrypt(enc_value: bytes, key: bytes, host_key: str = "",
+                 db_version: int = HOST_HASH_DB_VERSION) -> str | None:
+    """Win Chromium v10/v11 AES-256-GCM cookie 解密."""
     if not enc_value:
         return None
+    if enc_value[:3] == b"v20":
+        log.warning(_("cookies.v20_unsupported", env=SESSION_KEY_ENV))
+        return None
     if enc_value[:3] not in (b"v10", b"v11"):
-        try:
-            return enc_value.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
+        return _plain_or_none(enc_value)
     try:
         nonce = enc_value[3:15]
         ciphertext = enc_value[15:-16]
         tag = enc_value[-16:]
         cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-        # 跳过前 32 字节的 Chromium 内部前缀
-        if len(plaintext) > 32:
-            plaintext = plaintext[32:]
-        return plaintext.decode("utf-8", errors="replace")
-    except (ValueError, IndexError):
+        plaintext = _strip_host_hash(plaintext, host_key, db_version)
+        return plaintext.decode("utf-8")
+    except (ValueError, IndexError, UnicodeDecodeError):
         return None
 
 
 # ---------- 高层 API ----------
 
+def _valid_looking(sk: str) -> bool:
+    return bool(sk) and sk.isascii() and sk.isprintable() and " " not in sk
+
+
+def session_key_from_env() -> str | None:
+    sk = (os.environ.get(SESSION_KEY_ENV) or "").strip()
+    return sk or None
+
+
 def get_session_key() -> str | None:
-    """拿到 claude.ai 的 sessionKey。拿不到返回 None，不抛异常。"""
+    """拿到 claude.ai 的 sessionKey。拿不到返回 None，不抛异常。
+
+    Порядок: CLAUDE_SESSION_KEY → cookie Claude Desktop.
+    """
+    env_sk = session_key_from_env()
+    if env_sk:
+        log.info(_("cookies.env_override", env=SESSION_KEY_ENV))
+        return env_sk
+
     try:
-        rows = _read_encrypted_cookies()
-    except (sqlite3.Error, FileNotFoundError) as e:
-        log.debug(_("cookies.read_error", error=str(e)))
+        rows, db_version = _read_cookie_db()
+    except (sqlite3.Error, OSError, RuntimeError) as e:
+        log.warning(_("cookies.read_error", error=str(e)))
         return None
 
     target = [
@@ -197,6 +256,7 @@ def get_session_key() -> str | None:
     if not target:
         log.debug(_("cookies.not_found"))
         return None
+    log.debug("Cookies DB version=%d, sessionKey записей: %d", db_version, len(target))
 
     platform = detect_platform()
 
@@ -204,9 +264,9 @@ def get_session_key() -> str | None:
         key = _mac_find_safe_storage_key()
         if not key:
             return None
-        for _h, _n, enc in target:
-            decrypted = _mac_decrypt(enc, key)
-            if decrypted:
+        for h, _n, enc in target:
+            decrypted = _mac_decrypt(enc, key, h, db_version)
+            if decrypted and _valid_looking(decrypted):
                 log.info(_("cookies.mac_decrypt_ok", n=len(decrypted)))
                 return decrypted
         log.warning(_("cookies.mac_decrypt_fail"))
@@ -216,33 +276,43 @@ def get_session_key() -> str | None:
         key = _win_load_master_key()
         if not key:
             return None
-        for _h, _n, enc in target:
-            decrypted = _win_decrypt(enc, key)
-            if decrypted:
+        for h, _n, enc in target:
+            decrypted = _win_decrypt(enc, key, h, db_version)
+            if decrypted and _valid_looking(decrypted):
                 log.info(_("cookies.win_decrypt_ok", n=len(decrypted)))
                 return decrypted
         log.warning(_("cookies.win_decrypt_fail"))
         return None
 
-    # Linux：暂不支持
+    # Linux：Desktop не поддерживается, только CLAUDE_SESSION_KEY
     return None
 
 
 def describe_cookie_state() -> dict:
     """诊断用：告诉 UI 当前 cookie 情况。不解密 sessionKey 也不返回内容。"""
-    r: dict = {"platform": detect_platform()}
+    r: dict = {"platform": detect_platform(),
+               "env_override": session_key_from_env() is not None}
     try:
-        rows = _read_encrypted_cookies()
+        rows, db_version = _read_cookie_db()
         r["cookies_readable"] = True
+        r["cookies_db_version"] = db_version
         r["cookies_count"] = len(rows)
         r["has_session_key"] = any(n == SESSION_KEY_NAME for _, n, _ in rows)
+        r["session_key_formats"] = sorted({
+            v[:3].decode("ascii", "replace") for _, n, v in rows
+            if n == SESSION_KEY_NAME and v
+        })
         r["hosts_seen"] = sorted({h for h, _, _ in rows})
-    except FileNotFoundError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         r["cookies_readable"] = False
+        r["has_session_key"] = False
         r["error"] = str(e)
-    except sqlite3.Error as e:
+    except (sqlite3.Error, OSError) as e:
         r["cookies_readable"] = False
+        r["has_session_key"] = False
         r["error"] = f"sqlite error: {e}"
+    if r["env_override"]:
+        r["has_session_key"] = True
     return r
 
 

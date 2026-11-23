@@ -71,51 +71,150 @@ def _emit(msg: str, verbose: bool, always: bool = False) -> None:
 
 # ---------- 三模式执行 ----------
 
-def run_mode_a(output_root: Path, logger: Callable[[str], None]) -> tuple[dict[str, dict], dict]:
-    """返回 (uuid → conversation, stats)。"""
-    logger(_("main.mode_a_trying"))
+def _resolve_session_key(logger: Callable[[str], None]) -> str | None:
     sk = cookies.get_session_key()
     if not sk:
         logger(_("main.mode_a_no_key"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_key")}
+    return sk
+
+
+def _backup_project_knowledge(fetcher: ApiFetcher, org: dict, out_root: Path,
+                              projects: list[dict],
+                              logger: Callable[[str], None]) -> dict:
+    """Сохранить инструкции и документы знаний проектов организации.
+
+    Структура: <out_root>/project-knowledge/<org>/<project>/
+        project.json, INSTRUCTIONS.md, docs/<file_name>
+    Ошибки отдельных проектов не прерывают бэкап.
+    """
+    org_uuid = org["uuid"]
+    org_dir = out_root / "project-knowledge" / renderer.safe_name(
+        org.get("name") or org_uuid[:8], 60)
+    n_projects = n_docs = 0
+    for p in projects:
+        p_uuid = p.get("uuid")
+        if not p_uuid:
+            continue
+        p_dir = org_dir / renderer.safe_name(p.get("name") or p_uuid[:8], 80)
+        try:
+            details = fetcher.get_project(org_uuid, p_uuid) or p
+            docs = fetcher.list_project_docs(org_uuid, p_uuid)
+        except ApiError as e:
+            log.warning("Проект %s: %s", p_uuid[:8], e)
+            logger(_("main.mode_a_project_fail", name=p.get("name", p_uuid[:8]), error=str(e)))
+            continue
+        (p_dir / "docs").mkdir(parents=True, exist_ok=True)
+        (p_dir / "project.json").write_text(
+            json.dumps(details, ensure_ascii=False, indent=2), encoding="utf-8")
+        instructions = details.get("prompt_template") or ""
+        if instructions:
+            (p_dir / "INSTRUCTIONS.md").write_text(instructions, encoding="utf-8")
+        (p_dir / "docs.json").write_text(
+            json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
+        used: set[str] = set()
+        for d in docs:
+            content = d.get("content")
+            if content is None:
+                continue
+            fname = renderer.safe_name(d.get("file_name") or d.get("uuid", "doc"), 120)
+            if fname in used:
+                fname = f"{(d.get('uuid') or 'dup')[:8]}_{fname}"
+            used.add(fname)
+            (p_dir / "docs" / fname).write_text(content, encoding="utf-8")
+            n_docs += 1
+        n_projects += 1
+    return {"projects": n_projects, "docs": n_docs}
+
+
+def _run_mode_a_core(out_root: Path, logger: Callable[[str], None],
+                     skip_map: dict[str, str] | None = None
+                     ) -> tuple[dict[str, dict], dict, int, int]:
+    """Общая логика Mode A для полного и инкрементального режима.
+
+    Обходит ВСЕ организации с чатами. Возвращает (uuid→conv, stats, new, updated).
+    """
+    logger(_("main.mode_a_trying"))
+    sk = _resolve_session_key(logger)
+    if not sk:
+        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_key")}, 0, 0
 
     fetcher = ApiFetcher(sk)
     logger(_("main.mode_a_checking"))
     if not fetcher.probe():
         logger(_("main.mode_a_invalid"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_invalid")}
+        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_invalid")}, 0, 0
 
-    orgs = fetcher.list_organizations()
+    try:
+        orgs = fetcher.list_organizations_for_backup()
+    except ApiError as e:
+        logger(_("main.mode_a_fetch_error", error=str(e)))
+        orgs = []
     if not orgs:
         logger(_("main.mode_a_no_org"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_org")}
+        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_org")}, 0, 0
+    logger(_("main.mode_a_orgs", n=len(orgs)))
 
-    org_uuid = orgs[0]["uuid"]
-    logger(_("main.mode_a_login_ok", org=org_uuid[:8]))
-
-    raw_dir = output_root / "_raw" / "mode_a"
+    raw_dir = out_root / "_raw" / "mode_a"
+    raw_dir.mkdir(parents=True, exist_ok=True)
     convs: dict[str, dict] = {}
+    new_count = updated_count = 0
+    errors: list[str] = []
+    all_projects: list[dict] = []
+    knowledge = {"projects": 0, "docs": 0}
 
     def progress(idx, total, name):
         logger(f"[Mode A] {idx+1}/{total}: {name[:50]}")
 
-    try:
-        for conv in fetcher.stream_all(org_uuid, save_dir=raw_dir, progress=progress):
-            if "uuid" in conv:
-                convs[conv["uuid"]] = conv
-    except ApiError as e:
-        logger(_("main.mode_a_fetch_error", error=str(e)))
+    for org in orgs:
+        org_uuid = org["uuid"]
+        logger(_("main.mode_a_login_ok", org=f"{org.get('name', '')} ({org_uuid[:8]})"))
+        try:
+            for conv in fetcher.stream_all(org_uuid, save_dir=raw_dir,
+                                           progress=progress, skip_map=skip_map):
+                uuid = conv.get("uuid")
+                if not uuid:
+                    continue
+                convs[uuid] = conv
+                if skip_map is not None and uuid in skip_map:
+                    updated_count += 1
+                else:
+                    new_count += 1
+        except ApiError as e:
+            errors.append(f"{org_uuid[:8]}: {e}")
+            logger(_("main.mode_a_fetch_error", error=str(e)))
 
-    # 也把 projects 抓回来，供后续渲染用
-    try:
-        projects = fetcher.list_projects(org_uuid)
-        (raw_dir / "_projects.json").write_text(
-            json.dumps(projects, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except ApiError:
-        pass
+        # Проекты: метаданные + знания
+        try:
+            projects = fetcher.list_projects(org_uuid)
+        except ApiError:
+            projects = []
+        for p in projects:
+            p.setdefault("_org_uuid", org_uuid)
+        all_projects.extend(projects)
+        if projects:
+            k = _backup_project_knowledge(fetcher, org, out_root, projects, logger)
+            knowledge["projects"] += k["projects"]
+            knowledge["docs"] += k["docs"]
 
-    return convs, {"status": "ok", "count": len(convs), "org_uuid": org_uuid}
+    (raw_dir / "_projects.json").write_text(
+        json.dumps(all_projects, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger(_("main.mode_a_projects", projects=knowledge["projects"], docs=knowledge["docs"]))
+
+    stats = {"status": "ok",
+             "count": len(convs),
+             "org_uuid": orgs[0]["uuid"],
+             "org_uuids": [o["uuid"] for o in orgs],
+             "project_knowledge": knowledge}
+    if errors:
+        stats["partial"] = True
+        stats["errors"] = errors
+    return convs, stats, new_count, updated_count
+
+
+def run_mode_a(output_root: Path, logger: Callable[[str], None]) -> tuple[dict[str, dict], dict]:
+    """返回 (uuid → conversation, stats)。"""
+    convs, stats, _new, _upd = _run_mode_a_core(output_root, logger)
+    return convs, stats
 
 
 def run_mode_b(logger: Callable[[str], None]) -> tuple[dict[str, dict], dict]:
@@ -334,67 +433,17 @@ def run(output_dir: Path, modes: str, logger: Callable[[str], None]) -> dict:
 def _incremental_mode_a(backup_dir: Path, manifest: dict,
                          logger: Callable[[str], None]) -> tuple[dict[str, dict], dict]:
     """增量 Mode A：只抓新的或更新的对话。返回 (uuid→conv, stats)。"""
-    logger(_("main.mode_a_trying"))
-    sk = cookies.get_session_key()
-    if not sk:
-        logger(_("main.mode_a_no_key"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_key")}
-
-    fetcher = ApiFetcher(sk)
-    if not fetcher.probe():
-        logger(_("main.mode_a_invalid"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_invalid")}
-
-    orgs = fetcher.list_organizations()
-    if not orgs:
-        logger(_("main.mode_a_no_org"))
-        return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_org")}
-
-    org_uuid = orgs[0]["uuid"]
-    logger(_("main.mode_a_login_ok", org=org_uuid[:8]))
-
-    # 构建 skip_map：uuid → updated_at
     skip_map: dict[str, str] = {}
     for uuid, meta in manifest["conversations"].items():
         if meta.get("source") in ("online_api", "cache+api"):
             skip_map[uuid] = meta.get("updated_at", "")
 
-    raw_dir = backup_dir / "_raw" / "mode_a"
-    convs: dict[str, dict] = {}
-    new_count = 0
-    updated_count = 0
-
-    def progress(idx, total, name):
-        logger(f"[Mode A] {idx+1}/{total}: {name[:50]}")
-
-    try:
-        for conv in fetcher.stream_all(org_uuid, save_dir=raw_dir,
-                                       progress=progress, skip_map=skip_map):
-            uuid = conv.get("uuid")
-            if not uuid:
-                continue
-            convs[uuid] = conv
-            if uuid in skip_map:
-                updated_count += 1
-            else:
-                new_count += 1
-    except ApiError as e:
-        logger(_("main.mode_a_fetch_error", error=str(e)))
-
-    logger(_("main.mode_a_new_count", new=new_count, updated=updated_count))
-
-    # 抓 projects
-    try:
-        projects = fetcher.list_projects(org_uuid)
-        (raw_dir / "_projects.json").write_text(
-            json.dumps(projects, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except ApiError:
-        pass
-
-    return convs, {"status": "ok", "count": len(convs),
-                    "new": new_count, "updated": updated_count,
-                    "org_uuid": org_uuid}
+    convs, stats, new_count, updated_count = _run_mode_a_core(backup_dir, logger, skip_map)
+    if stats.get("status") == "ok":
+        logger(_("main.mode_a_new_count", new=new_count, updated=updated_count))
+        stats["new"] = new_count
+        stats["updated"] = updated_count
+    return convs, stats
 
 
 def _incremental_mode_b(manifest: dict,
@@ -738,6 +787,10 @@ def cmd_list(json_mode: bool) -> None:
                     "cookies_count": cookie_info.get("cookies_count", 0),
                     "has_session_key": cookie_info.get("has_session_key", False),
                     "hosts_seen": cookie_info.get("hosts_seen", []),
+                    "env_override": cookie_info.get("env_override", False),
+                    "cookies_db_version": cookie_info.get("cookies_db_version", 0),
+                    "session_key_formats": cookie_info.get("session_key_formats", []),
+                    "error": cookie_info.get("error", ""),
                 },
             },
             "mode_b": {
@@ -987,6 +1040,10 @@ def _determine_exit_code(stats: dict, modes: str) -> int:
 
     # mode_a 认证失败但其他模式成功
     if mode_a_auth_fail and any_mode_ok:
+        return EXIT_PARTIAL
+
+    # Mode A прошёл, но часть организаций упала
+    if "a" in modes and stats.get("mode_a", {}).get("partial"):
         return EXIT_PARTIAL
 
     return EXIT_SUCCESS
