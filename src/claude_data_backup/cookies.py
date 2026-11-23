@@ -27,6 +27,7 @@ from pathlib import Path
 
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Hash import SHA1  # Chromium: PBKDF2-HMAC-SHA1
 
 from .i18n import t as _
 from .paths import (
@@ -73,36 +74,40 @@ def _query_db(conn: sqlite3.Connection) -> tuple[list[tuple[str, str, bytes]], i
 def _read_cookie_db() -> tuple[list[tuple[str, str, bytes]], int]:
     """Прочитать cookie claude.ai и версию схемы БД.
 
-    Windows: Claude Desktop держит файл открытым — читаем копию во временном файле.
+    Всегда читаем копию во временном файле: на Windows запущенный Claude держит
+    файл открытым (а если монопольно — PermissionError → «заблокирован»), на macOS
+    копия не мешает работающему Claude и не ловит «database is locked».
     """
     db_path = claude_desktop_cookies_path()
-
-    if detect_platform() == "win":
-        fd, tmp_name = tempfile.mkstemp(suffix=".sqlite")
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-        try:
-            try:
-                shutil.copy2(db_path, tmp_path)
-            except PermissionError as e:
-                raise sqlite3.OperationalError(
-                    f"Cookies DB заблокирован ({e}). Закройте Claude Desktop "
-                    f"или задайте {SESSION_KEY_ENV}"
-                ) from e
-            conn = sqlite3.connect(str(tmp_path))
-            try:
-                return _query_db(conn)
-            finally:
-                conn.close()
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    uri = f"file:{db_path}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+    fd, tmp_name = tempfile.mkstemp(suffix=".sqlite")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    # Служебные файлы SQLite (WAL / журнал) копируем рядом под тем же именем:
+    # без них копия может не содержать последних записей (свежего sessionKey)
+    sidecars = [(Path(f"{db_path}{s}"), Path(f"{tmp_path}{s}")) for s in ("-wal", "-journal")]
     try:
-        return _query_db(conn)
+        try:
+            shutil.copy2(db_path, tmp_path)
+            for src, dst in sidecars:
+                if src.is_file():
+                    try:
+                        shutil.copy2(src, dst)
+                    except OSError:
+                        pass
+        except PermissionError as e:
+            raise sqlite3.OperationalError(
+                f"Cookies DB заблокирован ({e}). Закройте Claude Desktop "
+                f"или задайте {SESSION_KEY_ENV}"
+            ) from e
+        conn = sqlite3.connect(str(tmp_path))
+        try:
+            return _query_db(conn)
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        tmp_path.unlink(missing_ok=True)
+        for _src, dst in sidecars:
+            dst.unlink(missing_ok=True)
 
 
 def _read_encrypted_cookies() -> list[tuple[str, str, bytes]]:
@@ -135,21 +140,44 @@ def _plain_or_none(enc_value: bytes) -> str | None:
 
 # ---------- macOS ----------
 
+class KeychainAccessError(RuntimeError):
+    """macOS: запись «Claude Safe Storage» есть, но доступ не дан (отказ/таймаут)."""
+
+
+# macOS показывает диалог доступа к Связке ключей — даём человеку время ответить
+KEYCHAIN_TIMEOUT_S = 120
+KEYCHAIN_NOT_FOUND = 44   # код выхода `security`, если записи нет
+
+
 def _mac_find_safe_storage_key() -> bytes | None:
-    """依次试几个可能的 Keychain 服务名，返回 16 字节的 AES key。"""
+    """依次试几个可能的 Keychain 服务名，返回 16 字节的 AES key。
+
+    Нет записи ни под одним именем → None. Запись есть, но пользователь отказал
+    в доступе или не ответил → KeychainAccessError.
+    """
+    denied: str | None = None
     for svce in MAC_KEYCHAIN_SVCES:
         try:
-            out = subprocess.check_output(
+            r = subprocess.run(
                 ["security", "find-generic-password", "-w", "-s", svce],
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            ).decode().strip()
-            if out:
-                log.debug("Keychain 服务名 '%s' 匹配成功", svce)
-                # PBKDF2 派生：saltysalt, 1003 迭代, 16 字节
-                return PBKDF2(out, b"saltysalt", dkLen=16, count=1003)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-            continue
+                capture_output=True, timeout=KEYCHAIN_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            # Запись есть, запрос показан, ответа нет — остальные имена не пробуем
+            # (иначе каждое добавило бы ещё KEYCHAIN_TIMEOUT_S ожидания)
+            raise KeychainAccessError(f"нет ответа на запрос доступа к «{svce}»")
+        except FileNotFoundError:
+            return None
+        out = r.stdout.decode("utf-8", "replace").strip()
+        if r.returncode == 0 and out:
+            log.debug("Keychain 服务名 '%s' 匹配成功", svce)
+            # PBKDF2 派生：saltysalt, 1003 迭代, 16 字节
+            return PBKDF2(out, b"saltysalt", dkLen=16, count=1003, hmac_hash_module=SHA1)
+        # 44 = errSecItemNotFound (код не зависит от языка системы, в отличие от текста)
+        if r.returncode != KEYCHAIN_NOT_FOUND:
+            denied = f"доступ к «{svce}» не разрешён (код {r.returncode})"
+    if denied:
+        raise KeychainAccessError(denied)
     log.warning("所有 Keychain 服务名均未匹配: %s", MAC_KEYCHAIN_SVCES)
     return None
 
@@ -295,11 +323,14 @@ def is_lock_error(err: BaseException | str) -> bool:
 
 def read_session_key_from_desktop() -> tuple[str | None, str | None]:
     """Прочитать ключ из куки Desktop. Возвращает (ключ, ошибка).
-    Ошибка "locked" — файл занят запущенным Claude."""
+    Ошибки: "locked" — файл занят запущенным Claude (Windows); "keychain" — macOS
+    не дала доступ к «Claude Safe Storage»; "not_found" — нет входа в аккаунт."""
     try:
         sk = _session_key_from_cookie_db()
     except NoSessionCookie:
         return None, "not_found"
+    except KeychainAccessError:
+        return None, "keychain"
     except (sqlite3.Error, OSError, RuntimeError) as e:
         return None, ("locked" if is_lock_error(e) else str(e))
     return sk, (None if sk else "decrypt_failed")

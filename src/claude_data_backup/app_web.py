@@ -20,7 +20,7 @@ from . import __version__
 from . import config as cfg
 from . import history
 from . import manifest as mf
-from . import win_task
+from . import task_backend
 from .log import get_logger, log_path, setup_logging
 
 log = get_logger(__name__)
@@ -53,6 +53,17 @@ def _open(path: Path) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def key_error_text(err: str | None) -> str:
+    """Понятный текст ошибки чтения ключа (сырые детали — в журнале)."""
+    return {
+        "keychain": "macOS не дала доступ к «Claude Safe Storage». Нажмите ещё раз "
+                    "и выберите «Разрешить всегда».",
+        "not_found": "В Claude Desktop нет входа в аккаунт claude.ai — войдите и повторите.",
+        "locked": "Claude Desktop не дал прочитать файл с ключом. Повторите попытку.",
+        "decrypt_failed": "Ключ найден, но не расшифровался. Подробности — в журнале.",
+    }.get(err or "", "Не удалось прочитать ключ claude.ai. Подробности — в журнале.")
 
 
 def _compact_prep(r: dict) -> dict:
@@ -112,26 +123,34 @@ class Api:
             "summary": summary,
             "history": history.read(bdir, 60),
             "busy": self._busy.locked(),
-            "schedule_supported": IS_WIN,
+            "schedule_supported": task_backend.get() is not None,
         }
 
     def get_task(self) -> dict:
-        if not IS_WIN:
+        tb = task_backend.get()
+        if tb is None:
             return {"exists": False, "supported": False}
-        info = win_task.query()
-        info["ours"] = win_task.is_ours(info)
+        info = tb.query()
+        info["ours"] = tb.is_ours(info)
         info["supported"] = True
         return info
 
     # ── подготовка и ключ ───────────────────────────────────
-    def prepare(self) -> dict:
+    def prepare(self, read_key: bool = True) -> dict:
+        """read_key=False — не трогать куки (на macOS не вызывать снова запрос
+        к Связке ключей, если пользователь в нём уже отказал)."""
         from .prepare import run_prepare
         try:
-            r = _compact_prep(run_prepare())
+            r = _compact_prep(run_prepare(read_key=bool(read_key)))
         except Exception as e:
             log.error("prepare failed", exc_info=True)
             return {"error": str(e)}
         conf = cfg.load_config()
+        prev = conf.get("last_prep") or {}
+        if not read_key and (r.get("key") or {}).get("error") == "skipped" and prev.get("key"):
+            # Ключ в этот раз не читали — оставляем прежнее состояние ключа и входа,
+            # иначе после отказа в Связке ключей пропал бы баннер «Разрешить доступ»
+            r["key"], r["online"] = prev.get("key"), prev.get("online", {"checked": False})
         conf["last_prep"] = r
         cfg.save_config(conf)
         return r
@@ -142,6 +161,20 @@ class Api:
         процесс останавливается, а Claude запускается отсюда."""
         if not self._busy.acquire(blocking=False):
             return {"ok": False, "error": "Подождите, идёт другая операция"}
+        if not IS_WIN:
+            # macOS: Claude закрывать не нужно — куки читаются копией, а ключ
+            # шифрования macOS выдаёт из Связки ключей. Делаем полную проверку
+            # (один системный запрос + проверка входа онлайн) — окну не нужно
+            # запускать её повторно и вызывать второй запрос.
+            try:
+                r = self.prepare(True)
+            finally:
+                self._busy.release()
+            k = (r or {}).get("key") or {}
+            if k.get("found"):
+                return {"ok": True, "prep": r}
+            log.warning("read_key(mac): %s", k.get("error") or r.get("error"))
+            return {"ok": False, "prep": r, "error": key_error_text(k.get("error"))}
         from . import paths
         from .desktop_control import current_relaunch_command, launch
         res: dict = {"ok": False}
@@ -160,9 +193,9 @@ class Api:
                 log.error("read_key: helper timeout")
                 res = {"ok": False, "error": "Чтение ключа не уложилось в "
                        f"{READ_KEY_TIMEOUT_S} с и было остановлено. Подробности — в журнале."}
-            except Exception as e:
+            except Exception:
                 log.error("read_key failed", exc_info=True)
-                res = {"ok": False, "error": str(e)}
+                res = {"ok": False, "error": key_error_text(None)}
             if cmd and not paths.list_desktop_processes():
                 res["relaunched"] = launch(cmd)
             log.info("read_key: result ok=%s error=%s", res.get("ok"), res.get("error"))
@@ -236,13 +269,14 @@ class Api:
     def open_log(self) -> None:
         _open(log_path())
 
-    # ── расписание ──────────────────────────────────────────
-    def set_schedule(self, enabled: bool, at: str = win_task.DEFAULT_TIME) -> dict:
-        if not IS_WIN:
-            return {"ok": False, "error": "Расписание пока только для Windows"}
-        if enabled and not win_task.valid_time(at):
+    # ── расписание (Планировщик Windows / launchd) ─────────
+    def set_schedule(self, enabled: bool, at: str = "03:30") -> dict:
+        tb = task_backend.get()
+        if tb is None:
+            return {"ok": False, "error": "Расписание на этой системе не поддерживается"}
+        if enabled and not tb.valid_time(at):
             return {"ok": False, "error": "Время в формате ЧЧ:ММ, например 03:30"}
-        ok, err = win_task.install(at) if enabled else win_task.remove()
+        ok, err = tb.install(at) if enabled else tb.remove()
         conf = cfg.load_config()
         conf["schedule_auto_done"] = True
         cfg.save_config(conf)
@@ -251,12 +285,13 @@ class Api:
     def ensure_default_schedule(self) -> dict:
         """Первый запуск: создать ежедневную задачу, если её ещё нет."""
         conf = cfg.load_config()
-        if conf.get("schedule_auto_done") or not IS_WIN:
+        tb = task_backend.get()
+        if conf.get("schedule_auto_done") or tb is None:
             return {"created": False, "task": self.get_task()}
         info = self.get_task()
         created = False
         if not info.get("ours"):
-            created, _err = win_task.install(win_task.DEFAULT_TIME)
+            created, _err = tb.install(tb.DEFAULT_TIME)
         conf["schedule_auto_done"] = True
         cfg.save_config(conf)
         return {"created": created, "task": self.get_task()}
@@ -300,6 +335,32 @@ def _win_set_icon(title: str) -> None:
         log.debug("set icon failed", exc_info=True)
 
 
+def _mac_set_identity(name: str) -> None:
+    """macOS: имя в строке меню и иконка в Dock. Окно запускается интерпретатором
+    из venv (не из .app), поэтому без этого показывались бы «Python» и его иконка."""
+    if sys.platform != "darwin":
+        return
+    # Имя: известный приём — правка infoDictionary до создания меню. Если словарь
+    # окажется неизменяемым, имя останется «Python», но иконка всё равно ставится.
+    try:
+        from Foundation import NSBundle  # type: ignore
+        info = NSBundle.mainBundle().infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = name
+            info["CFBundleDisplayName"] = name
+    except Exception:
+        log.warning("macOS: не удалось задать имя приложения", exc_info=True)
+    try:
+        from AppKit import NSApplication, NSImage  # type: ignore
+        icns = Path(__file__).with_name("app-icon.icns")
+        if icns.is_file():
+            img = NSImage.alloc().initWithContentsOfFile_(str(icns))
+            if img is not None:
+                NSApplication.sharedApplication().setApplicationIconImage_(img)
+    except Exception:
+        log.warning("macOS: не удалось задать иконку", exc_info=True)
+
+
 def _background() -> str:
     try:
         import darkdetect
@@ -319,15 +380,16 @@ def main() -> None:
         fallback()
         return
     api = Api()
-    _win_set_app_id()
     title = "Бэкап Claude"
+    _win_set_app_id()
+    _mac_set_identity(title)
     try:
         win = webview.create_window(
             title, url=(WEB_DIR / "index.html").as_uri(), js_api=api,
             width=1080, height=800, min_size=(760, 620),
             background_color=_background(), text_select=False)
         api._window = win
-        win.events.shown += lambda: _win_set_icon(title)
+        win.events.shown += lambda: (_win_set_icon(title), _mac_set_identity(title))
         webview.start(debug=bool(os.environ.get("CDB_WEB_DEBUG")),
                       storage_path=str(cfg.CONFIG_DIR / "webview"))
     except Exception:

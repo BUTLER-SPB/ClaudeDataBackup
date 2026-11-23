@@ -42,7 +42,7 @@ def _verify_online(sk: str) -> dict:
         return {"checked": True, "ok": False, "error": f"Нет связи с claude.ai: {e}"}
 
 
-def run_prepare(verify_online: bool = True) -> dict:
+def run_prepare(verify_online: bool = True, read_key: bool = True) -> dict:
     paths.reset_desktop_root_cache()
     r: dict = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -63,10 +63,14 @@ def run_prepare(verify_online: bool = True) -> dict:
         cfg.save_config(conf)
 
     # 2. Ключ claude.ai
+    # read_key=False — не трогать куки (на macOS это вызовет запрос доступа к
+    # Связке ключей; окно не повторяет его в фоне после отказа пользователя)
     key = {"source": None, "locked": False, "error": None}
     sk = cookies.session_key_from_env()
     if sk:
         key["source"] = "env"
+    elif best and not read_key:
+        key["error"] = "skipped"
     elif best:
         sk, err = cookies.read_session_key_from_desktop()
         if sk:

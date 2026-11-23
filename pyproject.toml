@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-data-backup"
-version = "0.5.0"
+version = "0.6.0"
 description = "Cross-platform backup tool for Claude data: live API backup + HTTP cache mining + Claude Code CLI session export."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -49,7 +49,7 @@ claude-backup-run = "claude_data_backup.scheduled_run:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-claude_data_backup = ["py.typed", "locales/*.json", "app-icon.ico", "web/*"]
+claude_data_backup = ["py.typed", "locales/*.json", "app-icon.ico", "app-icon.icns", "web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -393,10 +393,11 @@ def generate_html(backup_dir: Path, logger: Callable[[str], None] | None = None,
         "items": all_items,
     }
 
-    data_json = json.dumps(data, ensure_ascii=False, default=_json_default)
-
-    # 用 base64 编码避免 JSON 中的特殊字符（反斜杠、</script> 等）破坏 HTML/JS 上下文
-    data_b64 = base64.b64encode(data_json.encode("utf-8")).decode("ascii")
+    # Данные могут весить сотни МБ: держим в памяти только байты UTF-8 (без копий
+    # строки), base64 пишем в файл кусками — иначе MemoryError на больших бэкапах.
+    data_bytes = json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
+    n_ai, n_cc = len(convs), len(sessions)
+    del data, all_items, convs, sessions
 
     # 构建 I18N JSON 供 JS 使用
     i18n_keys = [
@@ -411,26 +412,51 @@ def generate_html(backup_dir: Path, logger: Callable[[str], None] | None = None,
     ]
     i18n_json = json.dumps({k: _(k) for k in i18n_keys}, ensure_ascii=False)
 
-    html = _HTML_TEMPLATE.replace("__DATA_PLACEHOLDER__", data_b64)
-    html = html.replace("__I18N_PLACEHOLDER__", i18n_json)
-    html = html.replace("__HTML_LANG__", _("html.html_lang"))
-    html = html.replace("__HTML_TITLE__", _("html.viewer_title"))
-    html = html.replace("__SIDEBAR_HEADING__", _("html.sidebar_heading"))
-    html = html.replace("__SIDEBAR_SUBTITLE__",
-                        _("html.sidebar_subtitle", total=len(all_items),
-                          ai=len(convs), cc=len(sessions)))
-    html = html.replace("__SEARCH_PLACEHOLDER__", _("html.search_placeholder"))
-    html = html.replace("__FILTER_ALL__", _("html.filter_all"))
-    html = html.replace("__EMPTY_STATE__", _("html.empty_state"))
+    total = n_ai + n_cc
+    head, tail = _HTML_TEMPLATE.split("__DATA_PLACEHOLDER__", 1)
+    subs = {
+        "__I18N_PLACEHOLDER__": i18n_json,
+        "__HTML_LANG__": _("html.html_lang"),
+        "__HTML_TITLE__": _("html.viewer_title"),
+        "__SIDEBAR_HEADING__": _("html.sidebar_heading"),
+        "__SIDEBAR_SUBTITLE__": _("html.sidebar_subtitle", total=total,
+                                  ai=n_ai, cc=n_cc),
+        "__SEARCH_PLACEHOLDER__": _("html.search_placeholder"),
+        "__FILTER_ALL__": _("html.filter_all"),
+        "__EMPTY_STATE__": _("html.empty_state"),
+    }
+    for k, v in subs.items():
+        head, tail = head.replace(k, v), tail.replace(k, v)
 
     out_path = backup_dir / "index.html"
-    out_path.write_text(html, encoding="utf-8")
+    write_html_streamed(out_path, head, data_bytes, tail)
 
     if logger:
         size_kb = out_path.stat().st_size / 1024
-        logger(_("html.generated", count=len(all_items), size=f"{size_kb:.0f}"))
+        logger(_("html.generated", count=total, size=f"{size_kb:.0f}"))
 
     return out_path
+
+
+_B64_CHUNK = 3 * 1024 * 1024   # кратно 3 — куски base64 склеиваются без '=' внутри
+
+
+def write_html_streamed(out_path: Path, head: str, data: bytes, tail: str) -> None:
+    """head + base64(data) + tail во временный файл, затем атомарная замена.
+    При ошибке (нехватка памяти/места) прежний index.html остаётся целым."""
+    import os
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(head.encode("utf-8"))
+            mv = memoryview(data)
+            for i in range(0, len(mv), _B64_CHUNK):
+                f.write(base64.b64encode(mv[i:i + _B64_CHUNK]))
+            f.write(tail.encode("utf-8"))
+        os.replace(tmp, out_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---------- HTML 模板 ----------

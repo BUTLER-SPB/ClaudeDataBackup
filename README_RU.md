@@ -1,8 +1,27 @@
-# ClaudeDataBackup — форк BUTLER-SPB (Windows)
+# ClaudeDataBackup — форк BUTLER-SPB (Windows и macOS)
 
 Форк [morningcraft/ClaudeDataBackup](https://github.com/morningcraft/ClaudeDataBackup): локальный бэкап чатов claude.ai, кеша Claude Desktop и сессий Claude Code.
 
-## Установка для сотрудника (одна строка)
+## Установка на macOS (одна строка)
+
+Открыть «Терминал» (Программы → Утилиты) и вставить:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BUTLER-SPB/ClaudeDataBackup/main/scripts/install.sh | bash
+```
+
+Без sudo. Скрипт ставит uv и Python 3.12 в профиль пользователя, приложение — в `~/Library/Application Support/ClaudeDataBackup`, создаёт **Claude Backup** в `~/Applications` (видно в Launchpad и Spotlight) и открывает окно. Повторный запуск обновляет приложение. Удаление: `curl -fsSL …/install.sh | bash -s -- --uninstall` (бэкапы остаются).
+
+Отличия от Windows:
+
+| | macOS |
+|---|---|
+| Ключ claude.ai | Claude закрывать не нужно: куки читаются копией, а ключ шифрования macOS выдаёт из Связки ключей («Claude Safe Storage»). При первом подключении macOS спросит пароль — нажмите **«Разрешить всегда»**, иначе запрос будет появляться при каждом бэкапе, в том числе ночном. Ключ приложением не сохраняется |
+| Расписание | LaunchAgent `~/Library/LaunchAgents/com.butler.claudebackup.plist` (launchd, без sudo). Если Mac спал — запуск после пробуждения; если был выключен — в следующий раз по расписанию |
+| Профиль Desktop | `~/Library/Application Support/Claude` (и другие `Claude*` там же), запущенный процесс находится через `ps` |
+| Папка по умолчанию | `~/Documents/ClaudeDataBackup`. Если «Документы» синхронизируются с iCloud, лучше выбрать другую папку: просмотрщик `index.html` весит сотни МБ |
+
+## Установка на Windows (одна строка)
 
 Открыть PowerShell (Пуск → «PowerShell») и вставить:
 

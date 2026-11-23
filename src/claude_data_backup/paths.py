@@ -227,16 +227,27 @@ def _running_profile_dirs() -> list[Path]:
 
 
 def _probe_running_profile_dirs() -> list[Path]:
-    if detect_platform() != "win":
+    if detect_platform() not in ("win", "mac"):
         return []
     dirs: list[Path] = []
     for proc in list_desktop_processes():
-        m = re.search(r'--user-data-dir=(?:"([^"]+)"|(\S+))', proc.cmdline)
-        if m:
-            d = Path(m.group(1) or m.group(2))
-            if d.is_dir() and d not in dirs:
-                dirs.append(d)
+        d = user_data_dir_from_cmdline(proc.cmdline, detect_platform())
+        if d and d.is_dir() and d not in dirs:
+            dirs.append(d)
     return dirs
+
+
+def user_data_dir_from_cmdline(cmdline: str, platform: str) -> Path | None:
+    """--user-data-dir из командной строки. Windows: значение без пробелов или в
+    кавычках (дальше бывает « /prefetch:4»). macOS: ps выводит argv без кавычек,
+    а путь «~/Library/Application Support/…» содержит пробел — берём до « --»."""
+    if platform == "mac":
+        m = re.search(r'--user-data-dir=(?:"([^"]+)"|(.+?))(?= --|$)', cmdline)
+    else:
+        m = re.search(r'--user-data-dir=(?:"([^"]+)"|(\S+))', cmdline)
+    if not m:
+        return None
+    return Path((m.group(1) or m.group(2)).strip())
 
 
 @dataclass
@@ -260,13 +271,54 @@ def _is_desktop_exe(exe: str) -> bool:
 
 
 def list_desktop_processes() -> list[ProcInfo]:
-    """Процессы Claude Desktop текущего пользователя (Windows, WinAPI без PowerShell)."""
-    if detect_platform() != "win":
-        return []
+    """Процессы Claude Desktop текущего пользователя.
+    Windows — WinAPI без PowerShell; macOS — ps (процессы внутри Claude*.app)."""
+    p = detect_platform()
     try:
-        return [p for p in _win_list_processes("claude.exe") if _is_desktop_exe(p.exe)]
+        if p == "win":
+            return [x for x in _win_list_processes("claude.exe") if _is_desktop_exe(x.exe)]
+        if p == "mac":
+            return _mac_list_processes()
     except Exception:
-        return []
+        pass
+    return []
+
+
+_MAC_APP_RE = re.compile(r"/Claude[^/]*\.app/Contents/")
+
+
+def _parse_ps_cols(output: str, ncols: int) -> list[list[str]]:
+    rows = []
+    for line in output.splitlines():
+        parts = line.strip().split(None, ncols - 1)
+        if len(parts) == ncols and parts[0].isdigit():
+            rows.append(parts)
+    return rows
+
+
+def parse_mac_ps(comm_out: str, command_out: str, uid: int) -> list[ProcInfo]:
+    """Процессы Claude*.app этого пользователя.
+
+    comm_out — `ps -axww -o pid=,uid=,comm=` (comm = путь исполняемого файла):
+    по нему решаем, что это Claude Desktop (а не процесс, у которого путь к
+    Claude.app всего лишь встречается в аргументах, и не CLI Claude Code).
+    command_out — `ps -axww -o pid=,command=`: полная строка для --type/--user-data-dir.
+    """
+    commands = {int(p): c for p, c in _parse_ps_cols(command_out, 2)}
+    out: list[ProcInfo] = []
+    for pid_s, uid_s, exe in _parse_ps_cols(comm_out, 3):
+        if not uid_s.isdigit() or int(uid_s) != uid or not _MAC_APP_RE.search(exe):
+            continue
+        pid = int(pid_s)
+        out.append(ProcInfo(pid=pid, exe=exe.strip(), cmdline=commands.get(pid, exe)))
+    return out
+
+
+def _mac_list_processes() -> list[ProcInfo]:
+    def ps(cols: str) -> str:
+        return subprocess.run(["ps", "-axww", "-o", cols], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=10).stdout
+    return parse_mac_ps(ps("pid=,uid=,comm="), ps("pid=,command="), os.getuid())
 
 
 def _win_list_processes(image_name: str) -> list[ProcInfo]:

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.0 — fork BUTLER-SPB (2026-11-23)
+
+- feat(macOS): установщик одной строкой `scripts/install.sh` (`curl | bash`, без sudo): uv + Python 3.12, стандартный venv в `~/Library/Application Support/ClaudeDataBackup`, `Claude Backup.app` в `~/Applications`, `--uninstall`, `--source-dir`
+- feat(macOS): расписание через launchd (`mac_task.py`, LaunchAgent `com.butler.claudebackup`); общий выбор механизма — `task_backend.py`
+- feat(macOS): ключ из Связки ключей без закрытия Claude; явная ошибка «нет доступа» (`KeychainAccessError`), таймаут запроса 120 с; окно объясняет запрос заранее и не повторяет его в фоне после отказа
+- feat(macOS): процессы Claude Desktop через `ps` (только `Claude*.app` текущего пользователя), имя и иконка приложения в Dock/меню
+- fix: Cookies всегда читаются копией (и на macOS — без «database is locked»)
+- fix: PBKDF2 для куки macOS — явно HMAC-SHA1 (в pycryptodome вызов без хэша устаревает)
+- fix: `index.html` писался одной строкой с копиями на каждую замену — `MemoryError` на больших бэкапах, и файл оставался обнулённым. Теперь данные пишутся потоком во временный файл и атомарно подменяют старый
+- fix: повторный запрос `/organizations` сразу после проверки ключа получал 403 и превращался в «нет организаций» с итогом «успешно». Список берётся из проверки, на 403 — одна пауза и повтор, ошибка Mode A даёт «частично»
+- tests: `tests/test_macos.py`, `tests/test_html_stream.py`
+
 ## v0.5.0 — fork BUTLER-SPB (2026-11-23)
 
 - feat: новое окно на HTML (`app_web.py` + `web/index.html`, pywebview): статус, цифры, источники, настройки, история-лента вместо таблиц; светлая/тёмная тема; модальные подтверждения; автопроверка источников при открытии. `app_ru.py` остаётся запасным окном

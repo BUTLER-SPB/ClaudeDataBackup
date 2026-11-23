@@ -241,8 +241,8 @@ header h1{white-space:nowrap}
         <span class="chip idle" id="cCode">—</span>
       </div>
       <div class="banner" id="keyBanner">
-        <b>Нужно один раз подключить claude.ai</b>
-        <p>Claude Desktop закроется на несколько секунд и сразу откроется снова — так приложение получит доступ к чатам.</p>
+        <b id="kbTitle">Нужно один раз подключить claude.ai</b>
+        <p id="kbText">Claude Desktop закроется на несколько секунд и сразу откроется снова — так приложение получит доступ к чатам.</p>
         <button class="btn warn small" id="btnKey">Подключить</button>
       </div>
       <div class="card-foot"><span id="prepTime">Ещё не проверялось</span><button class="link" id="btnPrep">Проверить снова</button></div>
@@ -313,8 +313,39 @@ function setBusy(on, label){ busy=on; ['btnBackup','btnKey','btnPrep','btnDir'].
 function hero(state, title, sub){ const h=$('hero'); h.className='card hero s-'+state+(state==='run'?' running':''); $('statusIc').innerHTML=IC[state]||IC.idle; $('heroTitle').textContent=title; $('heroSub').textContent=sub||''; }
 function logLine(l){ const p=$('log'); p.textContent += l+'\n'; p.scrollTop=p.scrollHeight; $('cur').textContent=l; }
 
+/* ── платформа ─────────────────────────────────── */
+const isMac = () => S?.platform === 'darwin';
+const TXT = {
+  win: {
+    kbTitle:'Нужно один раз подключить claude.ai',
+    kbText:'Claude Desktop закроется на несколько секунд и сразу откроется снова — так приложение получит доступ к чатам.',
+    kbBtn:'Подключить',
+    runTitle:'Подключаю claude.ai', runSub:'Claude Desktop закроется на несколько секунд и откроется снова',
+    modalTitle:'Подключить claude.ai',
+    modal:`<p>Claude Desktop закроется на несколько секунд, приложение прочитает ключ входа, и Claude сразу откроется снова.</p>
+      <ul><li>несохранённый текст в окне Claude может пропасть;</li><li>сеансы во вкладке Code приложения Claude будут прерваны;</li><li>Claude Code в терминале не затрагивается.</li></ul>
+      <p style="font-size:12.5px">Ключ хранится зашифрованным: прочитать его может только ваша учётная запись Windows на этом компьютере.</p>`,
+    modalYes:'Подключить',
+    sched:'Если компьютер выключен, бэкап выполнится при включении.',
+  },
+  mac: {
+    kbTitle:'Разрешите доступ к чатам claude.ai',
+    kbText:'macOS спросит доступ к «Claude Safe Storage» в Связке ключей — введите пароль Mac и нажмите «Разрешить всегда». Claude закрывать не нужно.',
+    kbBtn:'Разрешить доступ',
+    runTitle:'Подключаю claude.ai', runSub:'Ответьте на запрос macOS о доступе к Связке ключей',
+    modalTitle:'Доступ к чатам claude.ai',
+    modal:`<p>Чтобы сохранять чаты claude.ai, приложению нужен ключ, которым Claude Desktop шифрует вход. macOS хранит его в Связке ключей и сейчас спросит разрешение.</p>
+      <ul><li>введите пароль от Mac;</li><li>нажмите <b>«Разрешить всегда»</b> — иначе запрос будет появляться при каждом бэкапе, в том числе ночном;</li><li>Claude Desktop закрывать не нужно.</li></ul>
+      <p style="font-size:12.5px">Ключ никуда не отправляется и не сохраняется приложением — он читается из Claude при каждом бэкапе.</p>`,
+    modalYes:'Продолжить',
+    sched:'Если Mac спал, бэкап выполнится после пробуждения; если был выключен — в следующий раз по расписанию.',
+  },
+};
+const T = () => TXT[isMac() ? 'mac' : 'win'];
+
 /* ── отрисовка ─────────────────────────────────── */
 function needKey(){ const k=S?.prep?.key, o=S?.prep?.online; if(!S?.prep?.desktop?.found) return false;
+  if(k && !k.found && k.error==='keychain') return true;
   if(k && !k.found && k.locked) return true; if(k?.source==='stored' && o?.checked && !o.ok) return true; return false; }
 
 function renderSources(){
@@ -327,11 +358,14 @@ function renderSources(){
   else if(k.found && o.checked){ chip('cKey','bad','Ошибка'); $('dKey').textContent=o.error||'Ключ не принят'; }
   else if(k.found){ chip('cKey','ok','Подключено'); $('dKey').textContent='Ключ сохранён'; }
   else if(k.locked){ chip('cKey','warn','Нужно подключить'); $('dKey').textContent='Claude Desktop открыт и не даёт прочитать ключ'; }
+  else if(k.error==='keychain'){ chip('cKey','warn','Нужен доступ'); $('dKey').textContent='macOS не дала доступ к ключу в Связке ключей'; }
+  else if(k.error==='skipped'){ chip('cKey','idle','Не проверялось'); $('dKey').textContent='Нажмите «Проверить снова», чтобы подключить'; }
   else if(d.found && k.error==='not_found'){ chip('cKey','bad','Нет входа'); $('dKey').textContent='Войдите в аккаунт в Claude Desktop и нажмите «Проверить снова»'; }
   else if(d.found){ chip('cKey','bad','Ошибка'); $('dKey').textContent=k.error||'Ключ не прочитан'; }
   else { chip('cKey','idle','—'); $('dKey').textContent='Нужен Claude Desktop с входом в аккаунт'; }
   if(c.found){ chip('cCode','ok', `${c.sessions} ${plural(c.sessions,'сессия','сессии','сессий')}`); $('dCode').textContent=c.dir; $('dCode').title=c.dir; }
   else { chip('cCode','idle','Нет'); $('dCode').textContent='Не используется на этом компьютере'; }
+  $('kbTitle').textContent=T().kbTitle; $('kbText').textContent=T().kbText; $('btnKey').textContent=T().kbBtn;
   $('keyBanner').classList.toggle('show', needKey());
   $('prepTime').textContent = p.time ? `Проверено ${when(p.time)}` : '';
 }
@@ -363,7 +397,7 @@ function renderTask(){
   $('schedOn').checked=!!t.exists; if(t.at) $('schedAt').value=t.at;
   if(!t.exists){ note.textContent='Выключен — бэкап только вручную'; $('stNext').innerHTML='<small>выключен</small>'; return; }
   const nd=parseT(t.next_run); $('stNext').innerHTML = nd ? `${hm(nd)} <small>${dayLabel(nd).toLowerCase()}</small>` : '—';
-  let s='Если компьютер выключен, бэкап выполнится при включении.';
+  let s=T().sched;
   if(!t.ours) s='Задача создана другой установкой — переключите, чтобы обновить.';
   note.textContent=s;
 }
@@ -392,26 +426,25 @@ async function refresh(){ S = await api().get_state(); render(); }
 async function refreshTask(){ TASK = await api().get_task(); renderTask(); }
 
 /* ── действия ──────────────────────────────────── */
-async function doPrepare(silent){
+async function doPrepare(silent, readKey=true){
   setBusy(true,'Проверяю…'); hero('run','Проверяю компьютер','Ищу Claude Desktop, ключ claude.ai и сессии Claude Code');
-  try{ const r=await api().prepare(); if(r.error) toast('Ошибка проверки: '+r.error); }
+  try{ const r=await api().prepare(readKey); if(r.error) toast('Ошибка проверки: '+r.error); }
   finally{ setBusy(false); await refresh(); }
   if(!silent && !needKey()) toast('Проверка завершена');
 }
 
 async function doReadKey(confirmed){
   if(!confirmed && !await confirmKey()) return false;
-  setBusy(true,'Подключаю…'); hero('run','Подключаю claude.ai','Claude Desktop закроется на несколько секунд и откроется снова');
+  setBusy(true,'Подключаю…'); hero('run',T().runTitle,T().runSub);
   let r={ok:false};
   try{ r=await api().read_key(); } finally{ setBusy(false); }
   if(r.ok) toast('claude.ai подключён'); else toast('Не удалось: '+(r.error||'ошибка'));
-  await doPrepare(true);
+  // На Mac read_key уже сделал полную проверку (второй запрос к Связке ключей не нужен)
+  if(r.prep) await refresh(); else await doPrepare(true);
   return r.ok;
 }
 function confirmKey(){
-  return ask('Подключить claude.ai', `<p>Claude Desktop закроется на несколько секунд, приложение прочитает ключ входа, и Claude сразу откроется снова.</p>
-    <ul><li>несохранённый текст в окне Claude может пропасть;</li><li>сеансы во вкладке Code приложения Claude будут прерваны;</li><li>Claude Code в терминале не затрагивается.</li></ul>
-    <p style="font-size:12.5px">Ключ хранится зашифрованным: прочитать его может только ваша учётная запись Windows на этом компьютере.</p>`, 'Подключить', 'Не сейчас');
+  return ask(T().modalTitle, T().modal, T().modalYes, 'Не сейчас');
 }
 
 async function doBackup(){
@@ -431,8 +464,15 @@ window.onBackend = async (e) => {
 
 /* первый запуск: проверка → (ключ) → расписание → первый бэкап */
 async function onboarding(){
-  await doPrepare(true);
-  if(needKey() && await confirmKey()) await doReadKey(true);
+  if(isMac()){
+    // На Mac первая проверка сама вызовет системный запрос к Связке ключей — сначала объясняем
+    const go = await confirmKey();
+    await doPrepare(true, go);
+    if(go && needKey() && await confirmKey()) await doReadKey(true);
+  } else {
+    await doPrepare(true);
+    if(needKey() && await confirmKey()) await doReadKey(true);
+  }
   const s=await api().ensure_default_schedule(); TASK=s.task; renderTask(); if(s.created) toast('Включён ежедневный бэкап в 03:30');
   await refresh(); if(!S.has_backup) doBackup();
 }
@@ -462,7 +502,9 @@ window.addEventListener('pywebviewready', async ()=>{
   if(S.first_run){ onboarding(); return; }
   // Состояние источников устарело (или не проверялось) — проверить тихо в фоне
   const pt = parseT(S.prep?.time);
-  if(!S.busy && (!pt || Date.now()-pt > 6*36e5)) doPrepare(true);
+  // На Mac после отказа в доступе к Связке ключей не повторяем системный запрос в фоне
+  const quietKey = !(isMac() && ['keychain','skipped'].includes(S.prep?.key?.error));
+  if(!S.busy && (!pt || Date.now()-pt > 6*36e5)) doPrepare(true, quietKey);
 });
 </script>
 </body>
