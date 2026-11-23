@@ -151,8 +151,9 @@ def _run_mode_a_core(out_root: Path, logger: Callable[[str], None],
     try:
         orgs = fetcher.list_organizations_for_backup()
     except ApiError as e:
+        # Ошибка сети/доступа — это не «нет организаций»: прогон должен стать «частичным»
         logger(_("main.mode_a_fetch_error", error=str(e)))
-        orgs = []
+        return {}, {"status": "error", "reason": str(e)}, 0, 0
     if not orgs:
         logger(_("main.mode_a_no_org"))
         return {}, {"status": "skipped", "reason": _("main.mode_a_skipped_no_org")}, 0, 0
@@ -1109,6 +1110,11 @@ def _determine_exit_code(stats: dict, modes: str) -> int:
     # Mode A прошёл, но часть организаций упала
     if "a" in modes and stats.get("mode_a", {}).get("partial"):
         return EXIT_PARTIAL
+
+    # Mode A выбран, но не отработал по другой причине (ошибка API, «нет организаций»)
+    # — это не успех: иначе история и окно покажут «Успешно» без чатов claude.ai
+    if "a" in modes and stats.get("mode_a", {}).get("status") != "ok":
+        return EXIT_PARTIAL if any_mode_ok else EXIT_ERROR
 
     return EXIT_SUCCESS
 

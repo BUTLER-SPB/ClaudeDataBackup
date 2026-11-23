@@ -74,6 +74,23 @@ def test_read_key_parses_helper_json(monkeypatch, tmp_config):
     assert app_web.Api().read_key()["ok"] is True
 
 
+def test_quiet_prepare_keeps_previous_key_state(tmp_config, monkeypatch):
+    from claude_data_backup import prepare
+    conf = cfg.load_config()
+    conf["last_prep"] = {"key": {"found": False, "error": "keychain"}, "online": {"checked": False}}
+    cfg.save_config(conf)
+    monkeypatch.setattr(prepare, "run_prepare", lambda **k: {
+        "time": "t", "desktop": {"found": True}, "key": {"found": False, "error": "skipped"},
+        "claude_code": {}})
+    r = app_web.Api().prepare(False)
+    assert r["key"]["error"] == "keychain"       # баннер «Разрешить доступ» не пропадает
+
+
+def test_key_error_text_is_russian():
+    assert "Разрешить всегда" in app_web.key_error_text("keychain")
+    assert "журнал" in app_web.key_error_text("没找到 Cookies")   # сырой текст не показываем
+
+
 def test_busy_blocks_parallel_operations(tmp_config):
     api = app_web.Api()
     api._busy.acquire()

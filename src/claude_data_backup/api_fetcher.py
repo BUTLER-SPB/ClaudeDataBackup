@@ -58,12 +58,20 @@ class ApiFetcher:
     def _get(self, path: str, retries: int = 3) -> dict | list:
         url = f"{API_BASE}{path}"
         backoff = 2.0
+        retried_403 = False
         for attempt in range(retries):
             try:
                 resp = self.sess.get(url, timeout=30)
                 if resp.status_code == 429:
                     time.sleep(min(backoff, 30))
                     backoff *= 2
+                    continue
+                if resp.status_code == 403 and not retried_403:
+                    # Бывает временный 403 от защиты claude.ai при частых запросах
+                    # (видели: 200 и сразу за ним 403 на тот же URL) — одна пауза и повтор
+                    retried_403 = True
+                    log.warning("403 на %s — повтор через 5 с", path)
+                    time.sleep(5)
                     continue
                 if resp.status_code == 401 or resp.status_code == 403:
                     raise ApiError(_("api.auth_fail", code=resp.status_code))
@@ -83,16 +91,24 @@ class ApiFetcher:
     # ---------- 公共 API ----------
 
     def probe(self) -> bool:
-        """快速判断 sessionKey 是否有效。"""
+        """快速判断 sessionKey 是否有效。Список организаций запоминается —
+        list_organizations() не делает повторный запрос."""
         try:
-            r = self._get("/organizations", retries=1)
-            return isinstance(r, list) and len(r) > 0
+            r = self._get("/organizations", retries=2)
         except ApiError:
             return False
+        if isinstance(r, list) and r:
+            self._orgs_cache = r
+            return True
+        return False
 
     def list_organizations(self) -> list[dict]:
+        cached = getattr(self, "_orgs_cache", None)
+        if cached is not None:
+            return cached
         r = self._get("/organizations")
-        return r if isinstance(r, list) else []
+        self._orgs_cache = r if isinstance(r, list) else []
+        return self._orgs_cache
 
     def list_organizations_for_backup(self) -> list[dict]:
         """Все организации, в которых есть чаты.
