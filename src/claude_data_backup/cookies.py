@@ -3,7 +3,7 @@
 Mac 和 Win 走不同路径取 AES key（Keychain vs DPAPI + Local State）。
 两个平台都用 Chromium 的标准加密格式解密 cookie value（v10/v11）。
 
-Fork changes (xmaxzzz):
+Fork changes (BUTLER-SPB):
 - Переопределение через переменную окружения CLAUDE_SESSION_KEY (fallback, если
   Desktop не установлен / расшифровка не работает / нужен другой аккаунт).
 - 32-байтовый префикс — это не App-Bound Encryption, а SHA256(host_key), который

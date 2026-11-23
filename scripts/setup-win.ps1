@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Установка ClaudeDataBackup (форк xmaxzzz) на Windows: venv через uv, проверка окружения,
+  Установка ClaudeDataBackup (форк BUTLER-SPB) на Windows: venv через uv, проверка окружения,
   опционально — папка бэкапа и ежедневная задача в Планировщике (без прав администратора).
 
 .EXAMPLE

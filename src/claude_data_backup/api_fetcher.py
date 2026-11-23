@@ -2,7 +2,7 @@
 
 用 sessionKey 直接调 claude.ai 的私有 API。端点和响应结构见 docs/data-formats.md。
 
-Fork changes (xmaxzzz):
+Fork changes (BUTLER-SPB):
 - list_conversations: пагинация limit/offset с дедупликацией (безопасно, даже если
   сервер игнорирует параметры и всегда отдаёт полный список).
 - stream_all: копия из save_dir переиспользуется только если её updated_at совпадает

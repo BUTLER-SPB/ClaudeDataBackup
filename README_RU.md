@@ -1,4 +1,4 @@
-# ClaudeDataBackup — форк xmaxzzz (Windows)
+# ClaudeDataBackup — форк BUTLER-SPB (Windows)
 
 Форк [morningcraft/ClaudeDataBackup](https://github.com/morningcraft/ClaudeDataBackup): локальный бэкап чатов claude.ai, кеша Claude Desktop и сессий Claude Code.
 
@@ -18,9 +18,8 @@
 
 ```powershell
 cd $env:USERPROFILE\src
-git clone https://github.com/xmaxzzz/ClaudeDataBackup.git
+git clone https://github.com/BUTLER-SPB/ClaudeDataBackup.git
 cd ClaudeDataBackup
-git checkout maxim/win-fixes
 powershell -ExecutionPolicy Bypass -File scripts\setup-win.ps1 -BackupDir "$env:USERPROFILE\ClaudeBackup" -ScheduleDaily -At 03:30
 ```
 
