@@ -239,12 +239,32 @@ def run_mode_b(logger: Callable[[str], None]) -> tuple[dict[str, dict], dict]:
     return convs, {"status": "ok", "cached_total": len(convs)}
 
 
+def _guard_cli_sessions(projects_dir: Path, logger: Callable[[str], None]) -> dict | None:
+    """Починить исходные сессии, испорченные hardlink-ами старых версий (fork BUTLER-SPB)."""
+    from . import session_guard
+    try:
+        r = session_guard.repair_sessions(projects_dir)
+    except OSError as e:
+        log.warning("[Mode C] проверка исходных сессий не удалась: %s", e)
+        return None
+    if r.found:
+        msg = (f"[Mode C] Сессии-ссылки или облачные плейсхолдеры: найдено {r.found}, "
+               f"исправлено {len(r.fixed)}, отложено (свежие) {len(r.recent)}, "
+               f"ошибок {len(r.failed)}")
+        logger(msg)
+        log.warning(msg)
+        for f in r.failed[:20]:
+            log.warning("  не исправлен: %s", f)
+    return r.to_dict()
+
+
 def run_mode_c(logger: Callable[[str], None]) -> tuple[list[cli_exporter.SessionData], dict]:
     projects_dir = paths.claude_cli_projects_dir_optional()
     if projects_dir is None:
         logger(_("main.mode_c_no_dir"))
         return [], {"status": "skipped", "reason": _("main.mode_c_skipped_no_dir")}
 
+    guard = _guard_cli_sessions(projects_dir, logger)
     counts = cli_exporter.count_sessions()
     logger(_("main.mode_c_prepare", real=counts['real'],
              observer=counts['observer'], test=counts['skipped_test']))
@@ -255,7 +275,7 @@ def run_mode_c(logger: Callable[[str], None]) -> tuple[list[cli_exporter.Session
         if (idx + 1) % 50 == 0:
             logger(_("main.mode_c_parsing", idx=idx + 1))
     logger(_("main.mode_c_total", count=len(sessions)))
-    return sessions, {"status": "ok",
+    return sessions, {"status": "ok", "guard": guard,
                       "real": sum(1 for s in sessions if s.category == "real")}
 
 
@@ -343,7 +363,10 @@ def write_cli_sessions(out_root: Path,
         md_path = proj_out / f"{stem}.md"
         jsonl_path = proj_out / f"{stem}.jsonl"
         md_path.write_text(renderer.render_cli_session(s), encoding="utf-8")
-        renderer.hardlink_or_copy(s.source_path, jsonl_path)
+        try:
+            renderer.copy_if_changed(s.source_path, jsonl_path)
+        except OSError as e:
+            log.warning("[Mode C] jsonl не скопирован %s: %s", jsonl_path.name, e)
 
         all_rows[s.session_id] = {
             "date": date, "project": s.project, "title": s.title,
@@ -497,6 +520,7 @@ def _incremental_mode_c(backup_dir: Path, manifest: dict,
         log.info(_("main.mode_c_no_dir"))
         return [], {"status": "skipped", "reason": _("main.mode_c_skipped_no_dir")}
 
+    guard = _guard_cli_sessions(projects_dir, logger)
     counts = cli_exporter.count_sessions()
     msg = _("main.mode_c_prepare", real=counts['real'],
             observer=counts['observer'], test=counts['skipped_test'])
@@ -516,7 +540,7 @@ def _incremental_mode_c(backup_dir: Path, manifest: dict,
     msg = _("main.mode_c_new", count=len(new_sessions))
     logger(msg)
     log.info(msg)
-    return new_sessions, {"status": "ok", "new": len(new_sessions),
+    return new_sessions, {"status": "ok", "new": len(new_sessions), "guard": guard,
                            "real": sum(1 for s in new_sessions if s.category == "real")}
 
 

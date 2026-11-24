@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.1 — fork BUTLER-SPB (2026-11-24)
+
+- fix: сессии Claude Code кладутся в бэкап обычной копией, а не hardlink. У hardlink одна запись файла с оригиналом, и если папка бэкапа в облаке (Яндекс.Диск, OneDrive), облако превращает в плейсхолдер и оригинал в `~/.claude/projects` — Claude Desktop не открывает сессию («looks like a link or a placeholder, not a regular file»). Копия обновляется, только если сессия изменилась (размер и время), пишется через временный файл и `os.replace`; старые hardlink в бэкапе заменяются копиями
+- fix: перед Mode C исходные сессии проверяются (reparse point или больше одного имени) и пересоздаются обычными файлами с тем же временем изменения; файлы, изменённые за последние 10 минут, откладываются до следующего прогона. Итог — в журнале и в `stats.mode_c.guard`
+- tests: `tests/test_session_copy.py`
+
 ## v0.6.0 — fork BUTLER-SPB (2026-11-23)
 
 - feat(macOS): установщик одной строкой `scripts/install.sh` (`curl | bash`, без sudo): uv + Python 3.12, стандартный venv в `~/Library/Application Support/ClaudeDataBackup`, `Claude Backup.app` в `~/Applications`, `--uninstall`, `--source-dir`
