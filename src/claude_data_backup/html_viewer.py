@@ -10,7 +10,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import manifest as mf
 from . import cli_exporter
@@ -386,18 +386,12 @@ def generate_html(backup_dir: Path, logger: Callable[[str], None] | None = None,
     # 按最后一条消息的时间倒序排列
     all_items.sort(key=lambda x: x.get("last_ts", x.get("created_at", "")), reverse=True)
 
-    # 构建嵌入数据
-    data = {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total": len(all_items),
-        "items": all_items,
-    }
-
-    # Данные могут весить сотни МБ: держим в памяти только байты UTF-8 (без копий
-    # строки), base64 пишем в файл кусками — иначе MemoryError на больших бэкапах.
-    data_bytes = json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
+    # Данные могут весить сотни МБ (картинки и PDF внутри как data URI).
+    # Цельный json.dumps держал бы в памяти строку (до 4 байт на символ) и её
+    # байты — MemoryError в ночном прогоне. Пишем JSON по одному элементу.
     n_ai, n_cc = len(convs), len(sessions)
-    del data, all_items, convs, sessions
+    del convs, sessions
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 构建 I18N JSON 供 JS 使用
     i18n_keys = [
@@ -429,7 +423,7 @@ def generate_html(backup_dir: Path, logger: Callable[[str], None] | None = None,
         head, tail = head.replace(k, v), tail.replace(k, v)
 
     out_path = backup_dir / "index.html"
-    write_html_streamed(out_path, head, data_bytes, tail)
+    write_html_streamed(out_path, head, iter_data_json(generated_at, all_items), tail)
 
     if logger:
         size_kb = out_path.stat().st_size / 1024
@@ -441,17 +435,46 @@ def generate_html(backup_dir: Path, logger: Callable[[str], None] | None = None,
 _B64_CHUNK = 3 * 1024 * 1024   # кратно 3 — куски base64 склеиваются без '=' внутри
 
 
-def write_html_streamed(out_path: Path, head: str, data: bytes, tail: str) -> None:
+def iter_data_json(generated_at: str, items: list) -> Iterator[bytes]:
+    """JSON {"generated_at", "total", "items"} кусками по одному элементу.
+
+    Каждый элемент сериализуется быстрым одноразовым json.dumps и сразу
+    отпускается из списка, так что пик памяти — один элемент, а не весь JSON.
+    """
+    def dump(o: Any) -> bytes:
+        return json.dumps(o, ensure_ascii=False, default=_json_default).encode("utf-8")
+
+    yield (b'{"generated_at": ' + dump(generated_at)
+           + b', "total": ' + dump(len(items)) + b', "items": [')
+    for i in range(len(items)):
+        chunk = dump(items[i])
+        items[i] = None
+        yield chunk if i == 0 else b", " + chunk
+    yield b"]}"
+
+
+def write_html_streamed(out_path: Path, head: str,
+                        data: bytes | Iterable[bytes], tail: str) -> None:
     """head + base64(data) + tail во временный файл, затем атомарная замена.
-    При ошибке (нехватка памяти/места) прежний index.html остаётся целым."""
-    import os
+
+    data — байты или поток кусков байт. При ошибке (нехватка памяти/места)
+    прежний index.html остаётся целым.
+    """
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        data = [bytes(data)]
     tmp = out_path.with_name(out_path.name + ".tmp")
     try:
         with open(tmp, "wb") as f:
             f.write(head.encode("utf-8"))
-            mv = memoryview(data)
-            for i in range(0, len(mv), _B64_CHUNK):
-                f.write(base64.b64encode(mv[i:i + _B64_CHUNK]))
+            buf = bytearray()
+            for piece in data:
+                buf += piece
+                if len(buf) >= _B64_CHUNK:
+                    cut = len(buf) - len(buf) % 3
+                    f.write(base64.b64encode(memoryview(buf)[:cut]))
+                    del buf[:cut]
+            if buf:
+                f.write(base64.b64encode(buf))
             f.write(tail.encode("utf-8"))
         os.replace(tmp, out_path)
     except BaseException:

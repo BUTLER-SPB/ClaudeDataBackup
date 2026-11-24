@@ -33,7 +33,7 @@ class SessionData:
     assistant_turns: int
     total_events: int
     events: list[dict]
-    source_path: Path       # 原始 .jsonl 路径（Mode C 要硬链接它）
+    source_path: Path       # 原始 .jsonl 路径（Mode C 复制它）
     title: str = ""
 
 

@@ -59,3 +59,37 @@ def test_generate_html_end_to_end(tmp_path):
     txt = out.read_text(encoding="utf-8")
     assert "__DATA_PLACEHOLDER__" not in txt and "__I18N_PLACEHOLDER__" not in txt
     assert "__SIDEBAR_SUBTITLE__" not in txt
+
+
+def test_iter_data_json_valid_and_releases_items(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(html_viewer, "_B64_CHUNK", 3 * 5)
+    items = [{"t": "привет 👋", "n": i} for i in range(7)]
+    expect = {"generated_at": "g", "total": 7, "items": [dict(x) for x in items]}
+    out = tmp_path / "index.html"
+    html_viewer.write_html_streamed(out, "<h>", html_viewer.iter_data_json("g", items), "</t>")
+    raw = out.read_bytes()
+    assert raw.startswith(b"<h>") and raw.endswith(b"</t>")
+    assert json.loads(base64.b64decode(raw[3:-4]).decode("utf-8")) == expect
+    assert items == [None] * 7                       # элементы отпущены по ходу
+
+
+def test_iter_data_json_empty():
+    import json
+    data = b"".join(html_viewer.iter_data_json("g", []))
+    assert json.loads(data) == {"generated_at": "g", "total": 0, "items": []}
+
+
+def test_viewer_failure_is_partial_and_logged(tmp_path, monkeypatch):
+    from claude_data_backup import main as cli
+
+    def boom(*a, **k):
+        raise MemoryError()
+    monkeypatch.setattr(cli, "generate_html_viewer", boom)
+    stats = {"mode_c": {"status": "ok", "new": 1}}
+    logs = []
+    cli._build_viewer(tmp_path, stats, logs.append, None)
+    assert stats["viewer"]["status"] == "error" and "MemoryError" in logs[0]
+    assert cli._determine_exit_code(stats, "c") == cli.EXIT_PARTIAL
+    stats["viewer"] = {"status": "ok"}
+    assert cli._determine_exit_code(stats, "c") == cli.EXIT_SUCCESS

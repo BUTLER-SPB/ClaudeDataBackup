@@ -58,14 +58,40 @@ def truncate_for_md(s: str, limit: int = 2000) -> str:
     return s[:limit] + "\n\n" + _("renderer.truncated", n=len(s) - limit)
 
 
-def hardlink_or_copy(src: Path, dst: Path) -> None:
-    """优先硬链接，跨卷/权限失败时 fallback 到复制。"""
-    if dst.exists():
-        return
+def atomic_copy(src: Path, dst: Path) -> None:
+    """Копия через временный файл + os.replace (fork BUTLER-SPB).
+
+    Подмена имени даёт dst новую запись файла: если dst был hardlink на src,
+    связь рвётся, а src не меняется.
+    """
+    tmp = dst.with_name(dst.name + ".cdb-tmp")
     try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def copy_if_changed(src: Path, dst: Path) -> bool:
+    """Обычная копия jsonl в бэкап; только если источник изменился. True — скопировано.
+
+    Hardlink не используется: у ссылки и оригинала одна запись файла, и облачная
+    папка (Яндекс.Диск, OneDrive) превращает в плейсхолдер (reparse point) и
+    оригинал в ~/.claude — Claude Desktop перестаёт открывать сессию.
+    Старый hardlink в dst заменяется копией. Сессии только дописываются,
+    поэтому «не изменился» = тот же размер и mtime не новее копии.
+    """
+    try:
+        d = dst.stat()
+    except FileNotFoundError:
+        d = None
+    if d is not None and not os.path.samefile(src, dst):
+        s = src.stat()
+        if s.st_size == d.st_size and s.st_mtime <= d.st_mtime:
+            return False
+    atomic_copy(src, dst)
+    return True
 
 
 # ---------- content blocks (共用：Mode A/B/C) ----------

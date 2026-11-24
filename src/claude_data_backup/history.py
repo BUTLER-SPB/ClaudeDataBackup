@@ -44,6 +44,9 @@ def make_record(stats: dict | None, exit_code: int, started: datetime,
         "mode_c": {"status": c.get("status", ""), "new": c.get("new", 0),
                    "real": c.get("real", 0), "reason": c.get("reason", "")},
     }
+    v = stats.get("viewer") or {}
+    if v.get("status") == "error":
+        rec["viewer"] = {"status": "error", "reason": v.get("reason", "")}
     if error:
         rec["error"] = error[-2000:]
     return rec
