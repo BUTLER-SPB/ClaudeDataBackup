@@ -458,7 +458,7 @@ def run(output_dir: Path, modes: str, logger: Callable[[str], None]) -> dict:
     (output_dir / "STATS.md").write_text(
         renderer.render_stats_report(stats, when), encoding="utf-8"
     )
-    generate_html_viewer(output_dir, logger, file_map=file_map)
+    _build_viewer(output_dir, stats, logger, file_map)
     logger(_("main.complete_output", dir=str(output_dir)))
     return stats
 
@@ -683,7 +683,7 @@ def _run_incremental(backup_dir: Path, modes: str,
         "session_total": s["session_count"],
     })
 
-    generate_html_viewer(backup_dir, logger, file_map=file_map)
+    _build_viewer(backup_dir, stats, logger, file_map)
     logger(_("main.complete_incremental", dir=str(backup_dir)))
     history.append(backup_dir, history.make_record(
         stats, _determine_exit_code(stats, modes), started))
@@ -1099,7 +1099,29 @@ def main():
         sys.exit(exit_code)
 
 
+def _build_viewer(out_dir: Path, stats: dict, logger: Callable[[str], None],
+                  file_map: dict | None) -> None:
+    """index.html — только просмотрщик: его сбой не отменяет уже сохранённый бэкап.
+    Прежний index.html остаётся целым, прогон считается «частично» (fork BUTLER-SPB)."""
+    try:
+        generate_html_viewer(out_dir, logger, file_map=file_map)
+        stats["viewer"] = {"status": "ok"}
+    except Exception as e:   # и MemoryError
+        msg = f"[HTML] index.html не обновлён: {type(e).__name__}: {e}"
+        logger(msg)
+        log.exception(msg)
+        stats["viewer"] = {"status": "error", "reason": f"{type(e).__name__}: {e}"[:300]}
+
+
 def _determine_exit_code(stats: dict, modes: str) -> int:
+    """index.html не собран — данные сохранены, но итог не «успешно»."""
+    code = _determine_exit_code_modes(stats, modes)
+    if code == EXIT_SUCCESS and (stats.get("viewer") or {}).get("status") == "error":
+        return EXIT_PARTIAL
+    return code
+
+
+def _determine_exit_code_modes(stats: dict, modes: str) -> int:
     """根据备份结果 stats 和选择的 modes 确定退出码。"""
     mode_a_auth_fail = False
     any_mode_ok = False
